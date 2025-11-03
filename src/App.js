@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
-import { TrendingUp, TrendingDown, Bell, AlertTriangle, Target, Plus, X, Volume2, Zap } from 'lucide-react';
+import { TrendingUp, TrendingDown, Bell, AlertTriangle, Target, Plus, X, Volume2, Zap, DollarSign, Shield } from 'lucide-react';
 
 const TradingSystem = () => {
   const [selectedStock, setSelectedStock] = useState('PETR4');
@@ -9,8 +9,9 @@ const TradingSystem = () => {
   const [stocksData, setStocksData] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [autoRefresh, setAutoRefresh] = useState(false); // DESABILITADO por padrão
   const [addStockInput, setAddStockInput] = useState('');
+  const [timeframe, setTimeframe] = useState('daily'); // daily, weekly, monthly, yearly
 
   const top30Liquid = [
     'PETR4', 'VALE3', 'ITUB4', 'BBDC4', 'ABEV3', 'BBAS3', 'B3SA3', 'WEGE3', 'RENT3', 'MGLU3',
@@ -33,6 +34,260 @@ const TradingSystem = () => {
     if (bbPosition < 0.3) score += 10;
     else if (bbPosition > 0.7) score -= 10;
     return Math.max(0, Math.min(100, score));
+  };
+
+  // Calcular pontos de entrada e saída baseado no timeframe e indicadores
+  const calculateEntryExit = (data, timeframe) => {
+    if (!data || !data.price) {
+      return {
+        entry: [{ price: 0, reason: 'Aguardando dados...', distance: 0 }],
+        exit: [{ price: 0, reason: 'Aguardando dados...', distance: 0 }],
+        stopLoss: 0
+      };
+    }
+
+    const entryPoints = [];
+    const exitPoints = [];
+
+    // Ajustar sensibilidade e parâmetros baseados no timeframe
+    const timeframeConfig = {
+      daily: { 
+        multiplier: 1, 
+        stopDistance: 0.97, 
+        rsiOverbought: 75, 
+        rsiOversold: 30,
+        macdStrong: 0.15,
+        adxStrong: 35,
+        targetMultiplier: 1.5
+      },
+      weekly: { 
+        multiplier: 1.5, 
+        stopDistance: 0.95, 
+        rsiOverbought: 73, 
+        rsiOversold: 32,
+        macdStrong: 0.12,
+        adxStrong: 30,
+        targetMultiplier: 2
+      },
+      monthly: { 
+        multiplier: 2.5, 
+        stopDistance: 0.92, 
+        rsiOverbought: 70, 
+        rsiOversold: 35,
+        macdStrong: 0.10,
+        adxStrong: 28,
+        targetMultiplier: 3
+      },
+      yearly: { 
+        multiplier: 4, 
+        stopDistance: 0.88, 
+        rsiOverbought: 68, 
+        rsiOversold: 38,
+        macdStrong: 0.08,
+        adxStrong: 25,
+        targetMultiplier: 5
+      }
+    };
+
+    const config = timeframeConfig[timeframe];
+    const tolerance = 0.015 * config.multiplier;
+
+    // Calcular distância percentual do preço atual
+    const calcDistance = (targetPrice) => {
+      return ((targetPrice - data.price) / data.price) * 100;
+    };
+
+    // PONTOS DE ENTRADA baseados em análise técnica ajustados por timeframe
+
+    // 1. Entrada por RSI oversold + Suporte (mais agressivo em timeframes maiores)
+    if (data.rsi < config.rsiOversold + (5 * (config.multiplier - 1))) {
+      const entryPrice = data.support * (1 - tolerance * 0.5);
+      entryPoints.push({
+        price: entryPrice,
+        reason: `RSI oversold (${data.rsi.toFixed(1)}) + Suporte`,
+        distance: calcDistance(entryPrice)
+      });
+    }
+
+    // 2. Entrada na banda inferior de Bollinger (ajustada por timeframe)
+    const bbLowerTarget = data.bollingerLower * (1 + tolerance * 0.3);
+    const bbLowerDistance = calcDistance(bbLowerTarget);
+    if (Math.abs(bbLowerDistance) < 15 * config.multiplier) {
+      entryPoints.push({
+        price: bbLowerTarget,
+        reason: `Banda Bollinger inferior (Timeframe ${timeframe})`,
+        distance: bbLowerDistance
+      });
+    }
+
+    // 3. Entrada em cruzamento de MA20 (mais conservador em timeframes maiores)
+    if (data.macd > -0.05 * config.multiplier) {
+      const ma20Entry = data.ma20 * (0.99 + tolerance);
+      entryPoints.push({
+        price: ma20Entry,
+        reason: `MA20 com MACD ${data.macd >= 0 ? 'positivo' : 'em recuperação'} (${data.macd.toFixed(3)})`,
+        distance: calcDistance(ma20Entry)
+      });
+    }
+
+    // 4. Entrada em MA50 para períodos maiores (monthly/yearly)
+    if ((timeframe === 'monthly' || timeframe === 'yearly') && data.adx > config.adxStrong - 10) {
+      const ma50Entry = data.ma50 * (0.98 + tolerance * 0.5);
+      entryPoints.push({
+        price: ma50Entry,
+        reason: `MA50 - Tendência ${timeframe === 'yearly' ? 'de longo prazo' : 'mensal'} (ADX ${data.adx.toFixed(1)})`,
+        distance: calcDistance(ma50Entry)
+      });
+    }
+
+    // 5. Entrada em pullback (ajustado por timeframe)
+    if (data.price > data.ma20 && data.macd > 0) {
+      const pullbackEntry = data.price * (0.97 + tolerance * 0.5);
+      entryPoints.push({
+        price: pullbackEntry,
+        reason: `Pullback em tendência de alta (${timeframe})`,
+        distance: calcDistance(pullbackEntry)
+      });
+    }
+
+    // 6. Entrada quando RSI está em zona ideal (varia por timeframe)
+    const idealRsiMin = 45 - (config.multiplier * 2);
+    const idealRsiMax = 55 + (config.multiplier * 2);
+    if (data.rsi > idealRsiMin && data.rsi < idealRsiMax && data.macd > 0) {
+      const idealEntry = data.price * (0.985 + tolerance);
+      entryPoints.push({
+        price: idealEntry,
+        reason: `RSI em zona ideal para ${timeframe} (${data.rsi.toFixed(1)})`,
+        distance: calcDistance(idealEntry)
+      });
+    }
+
+    // PONTOS DE SAÍDA baseados em análise técnica ajustados por timeframe
+
+    // 1. Saída em resistência técnica (mais agressiva em timeframes maiores)
+    const resistanceTarget = data.resistance * (1 + tolerance * 0.7);
+    exitPoints.push({
+      price: resistanceTarget,
+      reason: `Resistência técnica ${timeframe}`,
+      distance: calcDistance(resistanceTarget)
+    });
+
+    // 2. Saída na banda superior de Bollinger (ajustada)
+    const bbUpperTarget = data.bollingerUpper * (0.99 + tolerance * 0.5);
+    exitPoints.push({
+      price: bbUpperTarget,
+      reason: `Banda Bollinger superior (${timeframe})`,
+      distance: calcDistance(bbUpperTarget)
+    });
+
+    // 3. Saída por RSI overbought (threshold varia por timeframe)
+    if (data.rsi > config.rsiOverbought - 10) {
+      const rsiTarget = Math.min(data.resistance, data.bollingerUpper) * (1 + tolerance * 0.3);
+      exitPoints.push({
+        price: rsiTarget,
+        reason: `Alvo RSI (${data.rsi.toFixed(1)}) - Realizar lucros ${timeframe}`,
+        distance: calcDistance(rsiTarget)
+      });
+    }
+
+    // 4. Saída baseada em ATR (volatilidade) ajustada por timeframe
+    const atrEstimate = (data.bollingerUpper - data.bollingerLower) / 4;
+    const atrTarget = data.price + (atrEstimate * config.targetMultiplier);
+    exitPoints.push({
+      price: atrTarget,
+      reason: `Alvo por volatilidade (ATR × ${config.targetMultiplier}) - ${timeframe}`,
+      distance: calcDistance(atrTarget)
+    });
+
+    // 5. Alvo Fibonacci ajustado por timeframe
+    const fibonacciLevel = timeframe === 'daily' ? 1.382 : timeframe === 'weekly' ? 1.618 : timeframe === 'monthly' ? 2.0 : 2.618;
+    const fibTarget = data.support + ((data.resistance - data.support) * fibonacciLevel);
+    const potentialRR = (fibTarget - data.price) / (data.price - (data.support * config.stopDistance));
+    
+    if (potentialRR > 1.5) {
+      exitPoints.push({
+        price: fibTarget,
+        reason: `Fibonacci ${fibonacciLevel} (R/R ${potentialRR.toFixed(1)}:1) - ${timeframe}`,
+        distance: calcDistance(fibTarget)
+      });
+    }
+
+    // 6. Alvo agressivo para ADX forte (varia por timeframe)
+    if (data.adx > config.adxStrong && data.macd > config.macdStrong) {
+      const aggressiveMultiplier = 1 + (0.05 * config.multiplier);
+      const aggressiveTarget = data.resistance * aggressiveMultiplier;
+      exitPoints.push({
+        price: aggressiveTarget,
+        reason: `Tendência forte confirmada (ADX ${data.adx.toFixed(1)}, MACD ${data.macd.toFixed(3)}) - ${timeframe}`,
+        distance: calcDistance(aggressiveTarget)
+      });
+    }
+
+    // 7. Alvo conservador baseado em suporte/resistência range (ajustado)
+    const rangeSize = data.resistance - data.support;
+    const conservativeTarget = data.price + (rangeSize * 0.5 * config.multiplier);
+    if (conservativeTarget > data.price && conservativeTarget < data.resistance * 1.2) {
+      exitPoints.push({
+        price: conservativeTarget,
+        reason: `Alvo conservador ${timeframe} (50% do range)`,
+        distance: calcDistance(conservativeTarget)
+      });
+    }
+
+    // STOP LOSS inteligente baseado em análise técnica e timeframe
+    let stopLoss;
+    
+    // Stop loss ajustado por volatilidade e timeframe
+    const volatilityMargin = ((data.bollingerUpper - data.bollingerLower) / data.price) * 0.4 * config.multiplier;
+    stopLoss = data.support * (config.stopDistance - volatilityMargin);
+
+    // Ajustar stop para ADX fraco (mercado lateral) - mais apertado
+    if (data.adx < 20) {
+      stopLoss = data.support * (0.985 - tolerance * 0.5);
+    }
+
+    // Ajustar stop para ADX forte - pode ser mais amplo em timeframes maiores
+    if (data.adx > config.adxStrong) {
+      stopLoss = data.support * (config.stopDistance - tolerance * 0.3);
+    }
+
+    // Se não houver pontos de entrada viáveis
+    if (entryPoints.length === 0) {
+      entryPoints.push({
+        price: data.price,
+        reason: `Preço de mercado atual (${timeframe})`,
+        distance: 0
+      });
+    }
+
+    // Se não houver pontos de saída viáveis
+    if (exitPoints.length === 0) {
+      exitPoints.push({
+        price: data.resistance,
+        reason: 'Resistência técnica principal',
+        distance: calcDistance(data.resistance)
+      });
+    }
+
+    // Filtrar entradas que fazem sentido (não muito longe do preço)
+    const validEntries = entryPoints.filter(e => 
+      Math.abs(e.distance) < 20 * config.multiplier
+    );
+
+    // Filtrar saídas que fazem sentido (acima do preço atual)
+    const validExits = exitPoints.filter(e => 
+      e.distance > 0 && e.distance < 30 * config.multiplier
+    );
+
+    // Ordenar por distância
+    validEntries.sort((a, b) => Math.abs(a.distance) - Math.abs(b.distance));
+    validExits.sort((a, b) => b.distance - a.distance);
+
+    return {
+      entry: validEntries.length > 0 ? validEntries.slice(0, 4) : entryPoints.slice(0, 1),
+      exit: validExits.length > 0 ? validExits.slice(0, 4) : exitPoints.slice(0, 4),
+      stopLoss
+    };
   };
 
   useEffect(() => {
@@ -195,15 +450,19 @@ const TradingSystem = () => {
 
   const currentData = stocksData[selectedStock] || {};
   const signals = calculateSignals(currentData);
+  const entryExitData = calculateEntryExit(currentData, timeframe);
 
   const generateHistoricalData = () => {
     const data = [];
     let price = currentData.price || 18;
-    for (let i = 30; i >= 0; i--) {
+    const periods = timeframe === 'daily' ? 30 : timeframe === 'weekly' ? 52 : timeframe === 'monthly' ? 12 : 5;
+    const label = timeframe === 'daily' ? 'd' : timeframe === 'weekly' ? 's' : timeframe === 'monthly' ? 'm' : 'a';
+    
+    for (let i = periods; i >= 0; i--) {
       const variation = (Math.random() - 0.5) * 2;
       price = price * (1 + variation / 100);
       data.push({
-        time: `${i}d`,
+        time: `${i}${label}`,
         price: parseFloat(price.toFixed(2)),
         volume: Math.floor(Math.random() * 2000000) + 500000
       });
@@ -214,15 +473,60 @@ const TradingSystem = () => {
   const historicalData = generateHistoricalData();
 
   const addToWatchlist = () => {
-    if (addStockInput && top30Liquid.includes(addStockInput.toUpperCase())) {
-      const ticker = addStockInput.toUpperCase();
-      if (!watchlist.includes(ticker)) {
-        setWatchlist([...watchlist, ticker]);
-      }
-      setAddStockInput('');
-    } else if (addStockInput) {
-      alert('Ação não está entre as 30 mais líquidas da B3');
+    const ticker = addStockInput.toUpperCase().trim();
+    
+    if (!ticker) {
+      return;
     }
+
+    // Validar formato básico de ticker da B3 (letras + números)
+    const tickerPattern = /^[A-Z]{4}\d{1,2}$/;
+    if (!tickerPattern.test(ticker)) {
+      alert('Formato inválido. Use o formato correto (ex: MGLU3, PETR4, VALE3)');
+      return;
+    }
+
+    // Verificar se já existe na watchlist
+    if (watchlist.includes(ticker)) {
+      alert('Esta ação já está na sua watchlist!');
+      setAddStockInput('');
+      return;
+    }
+
+    // Adicionar à watchlist
+    setWatchlist([...watchlist, ticker]);
+
+    // Se não existir nos dados, criar dados simulados para ela
+    if (!stocksData[ticker]) {
+      const basePrice = Math.random() * 100 + 10;
+      const rsi = Math.random() * 100;
+      const macd = (Math.random() - 0.5) * 3;
+      const adx = Math.random() * 60 + 10;
+      const ma20 = basePrice * (0.95 + Math.random() * 0.1);
+      const ma50 = basePrice * (0.90 + Math.random() * 0.15);
+      const volume = Math.floor(Math.random() * 5000000) + 500000;
+      
+      setStocksData(prev => ({
+        ...prev,
+        [ticker]: {
+          price: parseFloat(basePrice.toFixed(2)),
+          change: (Math.random() - 0.5) * 6,
+          volume: volume,
+          liquidityRank: 31, // Fora do top 30
+          rsi: parseFloat(rsi.toFixed(2)),
+          macd: parseFloat(macd.toFixed(3)),
+          adx: parseFloat(adx.toFixed(2)),
+          ma20: parseFloat(ma20.toFixed(2)),
+          ma50: parseFloat(ma50.toFixed(2)),
+          bollingerUpper: parseFloat((basePrice * 1.15).toFixed(2)),
+          bollingerLower: parseFloat((basePrice * 0.85).toFixed(2)),
+          support: parseFloat((basePrice * 0.92).toFixed(2)),
+          resistance: parseFloat((basePrice * 1.08).toFixed(2))
+        }
+      }));
+    }
+
+    setAddStockInput('');
   };
 
   const removeFromWatchlist = (ticker) => {
@@ -239,13 +543,29 @@ const TradingSystem = () => {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-4">
+      {/* Disclaimer Legal */}
+      <div className="bg-yellow-900/20 border-2 border-yellow-600 rounded-xl p-4 mb-6">
+        <div className="flex items-start gap-3">
+          <Shield className="w-6 h-6 text-yellow-400 flex-shrink-0 mt-1" />
+          <div>
+            <h3 className="font-bold text-yellow-400 mb-2">⚠️ Aviso Legal Importante</h3>
+            <p className="text-sm text-yellow-100">
+              Este sistema apresenta <strong>apenas dados estatísticos e análises técnicas</strong> com fins educacionais e informativos. 
+              <strong> Não constitui recomendação de investimento, consultoria financeira ou oferta de compra/venda de ativos</strong>. 
+              O desenvolvedor não possui certificações para oferecer recomendações financeiras. 
+              Investimentos em ações envolvem riscos. Consulte um profissional certificado (AAI, CNPI) antes de investir.
+            </p>
+          </div>
+        </div>
+      </div>
+
       <div className="bg-slate-800 rounded-xl shadow-2xl p-6 mb-6 border border-slate-700">
         <div className="flex justify-between items-center flex-wrap gap-4">
           <div>
             <h1 className="text-4xl font-bold bg-gradient-to-r from-green-400 to-blue-500 bg-clip-text text-transparent">
               Trading System - B3
             </h1>
-            <p className="text-slate-400 mt-2">Top 5 Melhores Oportunidades • Score Otimizado • 30 Ações Mais Líquidas</p>
+            <p className="text-slate-400 mt-2">Análise Técnica • Dados Estatísticos • 30 Ações Mais Líquidas</p>
           </div>
           <div className="flex gap-4 items-center">
             <button
@@ -259,12 +579,8 @@ const TradingSystem = () => {
               onClick={() => setAutoRefresh(!autoRefresh)}
               className={`px-6 py-3 rounded-lg font-semibold transition-all ${autoRefresh ? 'bg-blue-600 hover:bg-blue-700' : 'bg-slate-700 hover:bg-slate-600'}`}
             >
-              {autoRefresh ? '⏸️ Pausar' : '▶️ Atualizar'}
+              {autoRefresh ? '⏸️ Pausar Auto-Atualização' : '▶️ Ativar Auto-Atualização'}
             </button>
-            <div className="text-right">
-              <div className="text-sm text-slate-400">Última atualização</div>
-              <div className="text-lg font-semibold">{new Date().toLocaleTimeString('pt-BR')}</div>
-            </div>
           </div>
         </div>
       </div>
@@ -318,7 +634,6 @@ const TradingSystem = () => {
             ) : (
               <div className="text-center py-8 text-slate-400">
                 <p className="text-sm">Aguardando identificação de oportunidades...</p>
-                <p className="text-xs mt-2">Buscando ações com score ≥ 70</p>
               </div>
             )}
           </div>
@@ -415,15 +730,90 @@ const TradingSystem = () => {
                   {signals.score}/100
                 </div>
                 <div className={`text-xl font-semibold mt-2 ${signals.score >= 70 ? 'text-green-400' : signals.score >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>
-                  {signals.score >= 70 ? '🔥 COMPRA FORTE' : signals.score >= 40 ? '⚠️ NEUTRO' : '🚫 VENDA'}
+                  {signals.score >= 70 ? '📊 Análise Positiva' : signals.score >= 40 ? '⚠️ Neutro' : '📉 Análise Negativa'}
                 </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Pontos de Entrada e Saída */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border-2 border-green-600">
+              <h3 className="text-xl font-bold mb-4 flex items-center text-green-400">
+                <DollarSign className="w-6 h-6 mr-2" />
+                Pontos de Entrada ({timeframe === 'daily' ? 'Diário' : timeframe === 'weekly' ? 'Semanal' : timeframe === 'monthly' ? 'Mensal' : 'Anual'})
+              </h3>
+              <div className="space-y-3">
+                {entryExitData.entry.map((entry, idx) => (
+                  <div key={idx} className="bg-green-900/20 p-3 rounded-lg">
+                    <div className="text-2xl font-bold text-green-400">R$ {entry.price?.toFixed(2)}</div>
+                    <div className="text-sm text-slate-300 mt-1">{entry.reason}</div>
+                    <div className={`text-xs mt-1 font-semibold ${entry.distance > 0 ? 'text-yellow-400' : entry.distance < 0 ? 'text-blue-400' : 'text-slate-400'}`}>
+                      {entry.distance !== 0 ? `${entry.distance > 0 ? '+' : ''}${entry.distance.toFixed(2)}% do preço atual` : 'Preço de mercado'}
+                    </div>
+                  </div>
+                ))}
+                <div className="bg-red-900/20 p-3 rounded-lg border-2 border-red-600">
+                  <div className="text-sm font-semibold text-red-400">Stop Loss ({timeframe === 'daily' ? 'Curto Prazo' : timeframe === 'weekly' ? 'Médio Prazo' : timeframe === 'monthly' ? 'Longo Prazo' : 'Muito Longo Prazo'})</div>
+                  <div className="text-xl font-bold text-red-400">R$ {entryExitData.stopLoss?.toFixed(2)}</div>
+                  <div className="text-xs text-slate-400 mt-1">
+                    {currentData.price && entryExitData.stopLoss ? 
+                      `-${(((currentData.price - entryExitData.stopLoss) / currentData.price) * 100).toFixed(2)}% do preço atual` 
+                      : 'Calculando...'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border-2 border-blue-600">
+              <h3 className="text-xl font-bold mb-4 flex items-center text-blue-400">
+                <TrendingUp className="w-6 h-6 mr-2" />
+                Pontos de Saída ({timeframe === 'daily' ? 'Diário' : timeframe === 'weekly' ? 'Semanal' : timeframe === 'monthly' ? 'Mensal' : 'Anual'})
+              </h3>
+              <div className="space-y-3">
+                {entryExitData.exit.map((exit, idx) => (
+                  <div key={idx} className="bg-blue-900/20 p-3 rounded-lg">
+                    <div className="text-2xl font-bold text-blue-400">R$ {exit.price?.toFixed(2)}</div>
+                    <div className="text-sm text-slate-300 mt-1">{exit.reason}</div>
+                    <div className="text-xs text-green-400 mt-1 font-semibold">
+                      {exit.distance ? `+${exit.distance.toFixed(2)}% de ganho potencial` : 'Calculando...'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Filtro de Período */}
+          <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold">Análise Temporal</h3>
+              <div className="flex gap-2">
+                {[
+                  { value: 'daily', label: 'Diário' },
+                  { value: 'weekly', label: 'Semanal' },
+                  { value: 'monthly', label: 'Mensal' },
+                  { value: 'yearly', label: 'Anual' }
+                ].map(period => (
+                  <button
+                    key={period.value}
+                    onClick={() => setTimeframe(period.value)}
+                    className={`px-4 py-2 rounded-lg font-semibold transition-all ${
+                      timeframe === period.value
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                    }`}
+                  >
+                    {period.label}
+                  </button>
+                ))}
               </div>
             </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
-              <h3 className="text-lg font-bold mb-4">Histórico de Preço (30 dias)</h3>
+              <h3 className="text-lg font-bold mb-4">Histórico de Preço ({timeframe === 'daily' ? '30 dias' : timeframe === 'weekly' ? '52 semanas' : timeframe === 'monthly' ? '12 meses' : '5 anos'})</h3>
               <ResponsiveContainer width="100%" height={250}>
                 <LineChart data={historicalData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
@@ -475,7 +865,7 @@ const TradingSystem = () => {
             <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
               <h3 className="text-lg font-bold mb-4 flex items-center text-green-400">
                 <TrendingUp className="w-5 h-5 mr-2" />
-                Sinais de Compra
+                Sinais Positivos
               </h3>
               <div className="space-y-2">
                 {signals.entry.length > 0 ? signals.entry.map((signal, idx) => (
@@ -505,7 +895,7 @@ const TradingSystem = () => {
             <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
               <h3 className="text-lg font-bold mb-4 flex items-center text-red-400">
                 <TrendingDown className="w-5 h-5 mr-2" />
-                Sinais de Venda
+                Sinais Negativos
               </h3>
               <div className="space-y-2">
                 {signals.exit.length > 0 ? signals.exit.map((signal, idx) => (
@@ -542,7 +932,7 @@ const TradingSystem = () => {
                   </div>
                 </div>
               )) : (
-                <p className="text-slate-500 text-center py-8">Aguardando gatilhos de trading...</p>
+                <p className="text-slate-500 text-center py-8">Nenhum alerta registrado</p>
               )}
             </div>
           </div>
@@ -550,8 +940,8 @@ const TradingSystem = () => {
       </div>
 
       <div className="mt-6 text-center text-sm text-slate-500">
-        <p>⚠️ Sistema com dados simulados para demonstração</p>
-        <p className="mt-1">🔄 Atualização automática a cada 5 segundos • 🎯 Top 5 selecionadas automaticamente (Score ≥ 70)</p>
+        <p>📊 Sistema de análise técnica com dados simulados para fins educacionais</p>
+        <p className="mt-1">⚠️ Não constitui recomendação de investimento • Consulte um profissional certificado</p>
       </div>
     </div>
   );
