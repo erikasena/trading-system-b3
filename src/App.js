@@ -25,17 +25,23 @@ const TradingSystem = () => {
   // 💾 CARREGAR DADOS SALVOS AO INICIAR
   useEffect(() => {
     try {
+      console.log('🔍 Verificando localStorage...');
+      
       // Carregar watchlist salva
       const savedWatchlist = localStorage.getItem('tradingB3_watchlist');
+      console.log('Watchlist salva:', savedWatchlist);
+      
       if (savedWatchlist) {
         const parsed = JSON.parse(savedWatchlist);
         if (Array.isArray(parsed) && parsed.length > 0) {
+          console.log('✅ Carregando watchlist:', parsed);
           setWatchlist(parsed);
         }
       }
 
       // Carregar ação selecionada
       const savedStock = localStorage.getItem('tradingB3_selectedStock');
+      console.log('Ação salva:', savedStock);
       if (savedStock) {
         setSelectedStock(savedStock);
       }
@@ -52,7 +58,7 @@ const TradingSystem = () => {
         setAutoRefresh(savedAutoRefresh === 'true');
       }
     } catch (error) {
-      console.error('Erro ao carregar dados salvos:', error);
+      console.error('❌ Erro ao carregar dados salvos:', error);
     }
   }, []);
 
@@ -881,7 +887,12 @@ const TradingSystem = () => {
     setWatchlist(newWatchlist);
     
     // 💾 SALVAR IMEDIATAMENTE
-    localStorage.setItem('tradingB3_watchlist', JSON.stringify(newWatchlist));
+    try {
+      localStorage.setItem('tradingB3_watchlist', JSON.stringify(newWatchlist));
+      console.log('💾 Watchlist salva:', newWatchlist);
+    } catch (error) {
+      console.error('❌ Erro ao salvar:', error);
+    }
     
     if (!stocksData[ticker]) {
       setLoading(true);
@@ -959,6 +970,17 @@ const TradingSystem = () => {
             )}
           </div>
           <div className="flex gap-4 items-center">
+            <button
+              onClick={() => {
+                const saved = localStorage.getItem('tradingB3_watchlist');
+                const selected = localStorage.getItem('tradingB3_selectedStock');
+                alert(`🔍 TESTE localStorage:\n\nWatchlist: ${saved}\nSelecionada: ${selected}\n\nQuantidade: ${watchlist.length} ações`);
+              }}
+              className="p-3 rounded-lg transition-all bg-purple-600 hover:bg-purple-700"
+              title="Testar localStorage"
+            >
+              🧪 Teste
+            </button>
             <button
               onClick={() => loadStocksData([...new Set([...top30Liquid, ...watchlist])])}
               disabled={loading}
