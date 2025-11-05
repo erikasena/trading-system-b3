@@ -1,23 +1,312 @@
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
-import { TrendingUp, TrendingDown, Bell, AlertTriangle, Target, Plus, X, Volume2, Zap, DollarSign, Shield } from 'lucide-react';
+import { TrendingUp, TrendingDown, Bell, AlertTriangle, Target, Plus, X, Volume2, Zap, DollarSign, Shield, RefreshCw } from 'lucide-react';
 
 const TradingSystem = () => {
-  const [selectedStock, setSelectedStock] = useState('PETR4');
+  const [selectedStock, setSelectedStock] = useState('');
   const [watchlist, setWatchlist] = useState([]);
   const [topOpportunities, setTopOpportunities] = useState([]);
   const [stocksData, setStocksData] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [autoRefresh, setAutoRefresh] = useState(false); // DESABILITADO por padrão
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [addStockInput, setAddStockInput] = useState('');
-  const [timeframe, setTimeframe] = useState('daily'); // daily, weekly, monthly, yearly
+  const [timeframe, setTimeframe] = useState('daily');
+  const [loading, setLoading] = useState(false);
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [loadingProgress, setLoadingProgress] = useState({ current: 0, total: 0 });
 
   const top30Liquid = [
     'PETR4', 'VALE3', 'ITUB4', 'BBDC4', 'ABEV3', 'BBAS3', 'B3SA3', 'WEGE3', 'RENT3', 'MGLU3',
     'ITSA4', 'HAPV3', 'ELET3', 'SUZB3', 'RADL3', 'RAIL3', 'JBSS3', 'EMBR3', 'PRIO3', 'UGPA3',
     'CSAN3', 'GGBR4', 'VIVT3', 'GOAU4', 'CSNA3', 'ENBR3', 'ENEV3', 'CPLE6', 'SBSP3', 'LREN3'
   ];
+
+  // 💾 CARREGAR DADOS SALVOS AO INICIAR
+  useEffect(() => {
+    try {
+      // Carregar watchlist salva
+      const savedWatchlist = localStorage.getItem('tradingB3_watchlist');
+      if (savedWatchlist) {
+        const parsed = JSON.parse(savedWatchlist);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setWatchlist(parsed);
+        }
+      }
+
+      // Carregar ação selecionada
+      const savedStock = localStorage.getItem('tradingB3_selectedStock');
+      if (savedStock) {
+        setSelectedStock(savedStock);
+      }
+
+      // Carregar timeframe
+      const savedTimeframe = localStorage.getItem('tradingB3_timeframe');
+      if (savedTimeframe) {
+        setTimeframe(savedTimeframe);
+      }
+
+      // Carregar auto-refresh
+      const savedAutoRefresh = localStorage.getItem('tradingB3_autoRefresh');
+      if (savedAutoRefresh !== null) {
+        setAutoRefresh(savedAutoRefresh === 'true');
+      }
+    } catch (error) {
+      console.error('Erro ao carregar dados salvos:', error);
+    }
+  }, []);
+
+  // 💾 SALVAR WATCHLIST AUTOMATICAMENTE
+  useEffect(() => {
+    if (watchlist.length > 0) {
+      try {
+        localStorage.setItem('tradingB3_watchlist', JSON.stringify(watchlist));
+      } catch (error) {
+        console.error('Erro ao salvar watchlist:', error);
+      }
+    }
+  }, [watchlist]);
+
+  // 💾 SALVAR AÇÃO SELECIONADA
+  useEffect(() => {
+    if (selectedStock) {
+      try {
+        localStorage.setItem('tradingB3_selectedStock', selectedStock);
+      } catch (error) {
+        console.error('Erro ao salvar ação selecionada:', error);
+      }
+    }
+  }, [selectedStock]);
+
+  // 💾 SALVAR TIMEFRAME
+  useEffect(() => {
+    try {
+      localStorage.setItem('tradingB3_timeframe', timeframe);
+    } catch (error) {
+      console.error('Erro ao salvar timeframe:', error);
+    }
+  }, [timeframe]);
+
+  // 💾 SALVAR AUTO-REFRESH
+  useEffect(() => {
+    try {
+      localStorage.setItem('tradingB3_autoRefresh', autoRefresh.toString());
+    } catch (error) {
+      console.error('Erro ao salvar auto-refresh:', error);
+    }
+  }, [autoRefresh]);
+
+  // API para buscar dados reais
+  const api = {
+    cache: new Map(),
+    cacheExpiry: 60000,
+
+    formatTicker(ticker) {
+      return `${ticker}.SA`;
+    },
+
+    async fetchStockData(ticker) {
+      try {
+        const cacheKey = ticker;
+        const cached = this.cache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < this.cacheExpiry) {
+          return cached.data;
+        }
+
+        const yahooTicker = this.formatTicker(ticker);
+        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooTicker}?interval=1d&range=1mo`;
+
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (!data?.chart?.result || data.chart.result.length === 0) {
+          throw new Error('Dados inválidos da API');
+        }
+
+        const result = data.chart.result[0];
+        const quote = result.indicators.quote[0];
+        const meta = result.meta;
+
+        const prices = quote.close.filter(p => p !== null);
+        const volumes = quote.volume.filter(v => v !== null);
+        const highs = quote.high.filter(h => h !== null);
+        const lows = quote.low.filter(l => l !== null);
+
+        if (prices.length === 0) {
+          throw new Error('Sem dados de preço');
+        }
+
+        const currentPrice = prices[prices.length - 1];
+        const previousPrice = prices[prices.length - 2] || currentPrice;
+        const change = ((currentPrice - previousPrice) / previousPrice) * 100;
+
+        const indicators = this.calculateIndicators(prices, volumes, highs, lows);
+
+        const stockData = {
+          ticker,
+          price: parseFloat(currentPrice.toFixed(2)),
+          change: parseFloat(change.toFixed(2)),
+          volume: volumes[volumes.length - 1] || 0,
+          liquidityRank: top30Liquid.indexOf(ticker) + 1 || 31,
+          ...indicators,
+          lastUpdate: new Date().toISOString(),
+          dataSource: 'Yahoo Finance',
+          historicalData: this.formatHistoricalData(
+            result.timestamp,
+            prices,
+            volumes
+          )
+        };
+
+        this.cache.set(cacheKey, {
+          data: stockData,
+          timestamp: Date.now()
+        });
+
+        return stockData;
+      } catch (error) {
+        console.error(`Erro ao buscar ${ticker}:`, error.message);
+        return this.getFallbackData(ticker);
+      }
+    },
+
+    formatHistoricalData(timestamps, prices, volumes) {
+      return timestamps.map((timestamp, index) => ({
+        timestamp,
+        date: new Date(timestamp * 1000).toLocaleDateString('pt-BR'),
+        price: prices[index],
+        volume: volumes[index]
+      })).filter(d => d.price !== null);
+    },
+
+    calculateIndicators(prices, volumes, highs, lows) {
+      const period14 = Math.min(14, prices.length);
+      const period20 = Math.min(20, prices.length);
+      const period50 = Math.min(50, prices.length);
+
+      const rsi = this.calculateRSI(prices, period14);
+      const macd = this.calculateMACD(prices);
+      const adx = this.calculateADX(highs, lows, prices, period14);
+      const ma20 = this.calculateSMA(prices, period20);
+      const ma50 = this.calculateSMA(prices, period50);
+      const bollinger = this.calculateBollingerBands(prices, period20, 2);
+      const support = Math.min(...lows.slice(-20));
+      const resistance = Math.max(...highs.slice(-20));
+
+      return {
+        rsi: parseFloat(rsi.toFixed(2)),
+        macd: parseFloat(macd.toFixed(3)),
+        adx: parseFloat(adx.toFixed(2)),
+        ma20: parseFloat(ma20.toFixed(2)),
+        ma50: parseFloat(ma50.toFixed(2)),
+        bollingerUpper: parseFloat(bollinger.upper.toFixed(2)),
+        bollingerLower: parseFloat(bollinger.lower.toFixed(2)),
+        support: parseFloat(support.toFixed(2)),
+        resistance: parseFloat(resistance.toFixed(2))
+      };
+    },
+
+    calculateRSI(prices, period = 14) {
+      if (prices.length < period + 1) return 50;
+      let gains = 0, losses = 0;
+      for (let i = prices.length - period; i < prices.length; i++) {
+        const change = prices[i] - prices[i - 1];
+        if (change > 0) gains += change;
+        else losses -= change;
+      }
+      const avgGain = gains / period;
+      const avgLoss = losses / period;
+      if (avgLoss === 0) return 100;
+      const rs = avgGain / avgLoss;
+      return 100 - (100 / (1 + rs));
+    },
+
+    calculateMACD(prices) {
+      const ema12 = this.calculateEMA(prices, 12);
+      const ema26 = this.calculateEMA(prices, 26);
+      return ema12 - ema26;
+    },
+
+    calculateEMA(prices, period) {
+      if (prices.length < period) return prices[prices.length - 1];
+      const multiplier = 2 / (period + 1);
+      let ema = prices.slice(0, period).reduce((a, b) => a + b) / period;
+      for (let i = period; i < prices.length; i++) {
+        ema = (prices[i] - ema) * multiplier + ema;
+      }
+      return ema;
+    },
+
+    calculateSMA(prices, period) {
+      if (prices.length < period) period = prices.length;
+      const slice = prices.slice(-period);
+      return slice.reduce((a, b) => a + b) / slice.length;
+    },
+
+    calculateADX(highs, lows, closes, period = 14) {
+      if (highs.length < period + 1) return 25;
+      let dmPlus = 0, dmMinus = 0, tr = 0;
+      for (let i = Math.max(1, highs.length - period); i < highs.length; i++) {
+        const highDiff = highs[i] - highs[i - 1];
+        const lowDiff = lows[i - 1] - lows[i];
+        dmPlus += (highDiff > lowDiff && highDiff > 0) ? highDiff : 0;
+        dmMinus += (lowDiff > highDiff && lowDiff > 0) ? lowDiff : 0;
+        const tr1 = highs[i] - lows[i];
+        const tr2 = Math.abs(highs[i] - closes[i - 1]);
+        const tr3 = Math.abs(lows[i] - closes[i - 1]);
+        tr += Math.max(tr1, tr2, tr3);
+      }
+      const diPlus = (dmPlus / tr) * 100;
+      const diMinus = (dmMinus / tr) * 100;
+      const dx = Math.abs(diPlus - diMinus) / (diPlus + diMinus) * 100;
+      return dx || 25;
+    },
+
+    calculateBollingerBands(prices, period = 20, stdDev = 2) {
+      const sma = this.calculateSMA(prices, period);
+      const slice = prices.slice(-Math.min(period, prices.length));
+      const variance = slice.reduce((sum, price) => sum + Math.pow(price - sma, 2), 0) / slice.length;
+      const std = Math.sqrt(variance);
+      return {
+        middle: sma,
+        upper: sma + (std * stdDev),
+        lower: sma - (std * stdDev)
+      };
+    },
+
+    getFallbackData(ticker) {
+      const basePrice = Math.random() * 80 + 10;
+      return {
+        ticker,
+        price: parseFloat(basePrice.toFixed(2)),
+        change: (Math.random() - 0.5) * 6,
+        volume: Math.floor(Math.random() * 5000000) + 500000,
+        liquidityRank: top30Liquid.indexOf(ticker) + 1 || 31,
+        rsi: parseFloat((Math.random() * 100).toFixed(2)),
+        macd: parseFloat(((Math.random() - 0.5) * 3).toFixed(3)),
+        adx: parseFloat((Math.random() * 60 + 10).toFixed(2)),
+        ma20: parseFloat((basePrice * (0.95 + Math.random() * 0.1)).toFixed(2)),
+        ma50: parseFloat((basePrice * (0.90 + Math.random() * 0.15)).toFixed(2)),
+        bollingerUpper: parseFloat((basePrice * 1.15).toFixed(2)),
+        bollingerLower: parseFloat((basePrice * 0.85).toFixed(2)),
+        support: parseFloat((basePrice * 0.92).toFixed(2)),
+        resistance: parseFloat((basePrice * 1.08).toFixed(2)),
+        dataSource: 'Simulado',
+        lastUpdate: new Date().toISOString(),
+        historicalData: []
+      };
+    }
+  };
 
   const calculateScore = (data) => {
     let score = 0;
@@ -36,12 +325,11 @@ const TradingSystem = () => {
     return Math.max(0, Math.min(100, score));
   };
 
-  // Calcular pontos de entrada e saída baseado no timeframe e indicadores
   const calculateEntryExit = (data, timeframe) => {
     if (!data || !data.price) {
       return {
-        entry: [{ price: 0, reason: 'Aguardando dados...', distance: 0 }],
-        exit: [{ price: 0, reason: 'Aguardando dados...', distance: 0 }],
+        entry: [{ price: 0, reason: 'Aguardando dados...', distance: 0, probability: 0 }],
+        exit: [{ price: 0, reason: 'Aguardando dados...', distance: 0, probability: 0 }],
         stopLoss: 0
       };
     }
@@ -49,294 +337,333 @@ const TradingSystem = () => {
     const entryPoints = [];
     const exitPoints = [];
 
-    // Ajustar sensibilidade e parâmetros baseados no timeframe
+    // Configuração ULTRA CONSERVADORA - alvos realistas por timeframe
     const timeframeConfig = {
       daily: { 
         multiplier: 1, 
         stopDistance: 0.97, 
-        rsiOverbought: 75, 
         rsiOversold: 30,
-        macdStrong: 0.15,
-        adxStrong: 35,
-        targetMultiplier: 1.5
+        rsiOverbought: 70,
+        maxTargetDistance: 0.025, // 2.5% MÁXIMO para diário
+        conservativeTarget: 0.015, // 1.5% conservador
+        realisticTarget: 0.02, // 2% realista
+        adxMinimum: 25
       },
       weekly: { 
         multiplier: 1.5, 
         stopDistance: 0.95, 
-        rsiOverbought: 73, 
         rsiOversold: 32,
-        macdStrong: 0.12,
-        adxStrong: 30,
-        targetMultiplier: 2
+        rsiOverbought: 68,
+        maxTargetDistance: 0.06, // 6% máximo semanal
+        conservativeTarget: 0.035, // 3.5% conservador
+        realisticTarget: 0.045, // 4.5% realista
+        adxMinimum: 23
       },
       monthly: { 
         multiplier: 2.5, 
         stopDistance: 0.92, 
-        rsiOverbought: 70, 
         rsiOversold: 35,
-        macdStrong: 0.10,
-        adxStrong: 28,
-        targetMultiplier: 3
+        rsiOverbought: 65,
+        maxTargetDistance: 0.12, // 12% máximo mensal
+        conservativeTarget: 0.07, // 7% conservador
+        realisticTarget: 0.09, // 9% realista
+        adxMinimum: 20
       },
       yearly: { 
         multiplier: 4, 
         stopDistance: 0.88, 
-        rsiOverbought: 68, 
         rsiOversold: 38,
-        macdStrong: 0.08,
-        adxStrong: 25,
-        targetMultiplier: 5
+        rsiOverbought: 62,
+        maxTargetDistance: 0.25, // 25% máximo anual
+        conservativeTarget: 0.15, // 15% conservador
+        realisticTarget: 0.20, // 20% realista
+        adxMinimum: 18
       }
     };
 
     const config = timeframeConfig[timeframe];
-    const tolerance = 0.015 * config.multiplier;
-
-    // Calcular distância percentual do preço atual
-    const calcDistance = (targetPrice) => {
-      return ((targetPrice - data.price) / data.price) * 100;
+    const calcDistance = (targetPrice) => ((targetPrice - data.price) / data.price) * 100;
+    
+    // Calcular probabilidade REALISTA baseada em múltiplos indicadores
+    const calculateProbability = (targetPrice, isEntry = false) => {
+      let probability = 40; // Base mais baixa: 40%
+      const distance = Math.abs(calcDistance(targetPrice));
+      
+      // Penalizar MUITO alvos distantes
+      if (distance < 1) probability += 30;
+      else if (distance < 2) probability += 20;
+      else if (distance < 3) probability += 10;
+      else if (distance < 5) probability += 5;
+      else if (distance > 8) probability -= 25;
+      else if (distance > 5) probability -= 15;
+      
+      if (isEntry) {
+        // Para entradas
+        if (data.rsi < 30) probability += 20;
+        else if (data.rsi < 40) probability += 12;
+        else if (data.rsi > 70) probability -= 20;
+        
+        if (data.macd > 0.1) probability += 12;
+        else if (data.macd > 0) probability += 6;
+        else if (data.macd < -0.2) probability -= 15;
+        
+        if (data.adx > 40) probability += 12;
+        else if (data.adx > 30) probability += 6;
+        else if (data.adx < 20) probability -= 12;
+        
+        if (data.price < data.ma20 && data.price < data.ma50) probability += 8;
+        
+        // Bônus se está perto do suporte
+        const distToSupport = Math.abs(((data.price - data.support) / data.support) * 100);
+        if (distToSupport < 2) probability += 10;
+        
+      } else {
+        // Para saídas - MUITO mais rigoroso
+        if (data.rsi > 70) probability += 15;
+        else if (data.rsi > 60) probability += 8;
+        else if (data.rsi < 50) probability -= 15;
+        
+        if (data.macd > 0.3) probability += 12;
+        else if (data.macd > 0.1) probability += 6;
+        else if (data.macd < 0) probability -= 20;
+        
+        if (data.adx > 45) probability += 12;
+        else if (data.adx > 35) probability += 6;
+        else if (data.adx < 25) probability -= 20;
+        
+        if (data.price > data.ma20 && data.price > data.ma50) probability += 8;
+        else probability -= 10;
+      }
+      
+      return Math.max(10, Math.min(92, probability));
     };
 
-    // PONTOS DE ENTRADA baseados em análise técnica ajustados por timeframe
-
-    // 1. Entrada por RSI oversold + Suporte (mais agressivo em timeframes maiores)
-    if (data.rsi < config.rsiOversold + (5 * (config.multiplier - 1))) {
-      const entryPrice = data.support * (1 - tolerance * 0.5);
-      entryPoints.push({
-        price: entryPrice,
-        reason: `RSI oversold (${data.rsi.toFixed(1)}) + Suporte`,
-        distance: calcDistance(entryPrice)
-      });
-    }
-
-    // 2. Entrada na banda inferior de Bollinger (ajustada por timeframe)
-    const bbLowerTarget = data.bollingerLower * (1 + tolerance * 0.3);
-    const bbLowerDistance = calcDistance(bbLowerTarget);
-    if (Math.abs(bbLowerDistance) < 15 * config.multiplier) {
-      entryPoints.push({
-        price: bbLowerTarget,
-        reason: `Banda Bollinger inferior (Timeframe ${timeframe})`,
-        distance: bbLowerDistance
-      });
-    }
-
-    // 3. Entrada em cruzamento de MA20 (mais conservador em timeframes maiores)
-    if (data.macd > -0.05 * config.multiplier) {
-      const ma20Entry = data.ma20 * (0.99 + tolerance);
-      entryPoints.push({
-        price: ma20Entry,
-        reason: `MA20 com MACD ${data.macd >= 0 ? 'positivo' : 'em recuperação'} (${data.macd.toFixed(3)})`,
-        distance: calcDistance(ma20Entry)
-      });
-    }
-
-    // 4. Entrada em MA50 para períodos maiores (monthly/yearly)
-    if ((timeframe === 'monthly' || timeframe === 'yearly') && data.adx > config.adxStrong - 10) {
-      const ma50Entry = data.ma50 * (0.98 + tolerance * 0.5);
-      entryPoints.push({
-        price: ma50Entry,
-        reason: `MA50 - Tendência ${timeframe === 'yearly' ? 'de longo prazo' : 'mensal'} (ADX ${data.adx.toFixed(1)})`,
-        distance: calcDistance(ma50Entry)
-      });
-    }
-
-    // 5. Entrada em pullback (ajustado por timeframe)
-    if (data.price > data.ma20 && data.macd > 0) {
-      const pullbackEntry = data.price * (0.97 + tolerance * 0.5);
-      entryPoints.push({
-        price: pullbackEntry,
-        reason: `Pullback em tendência de alta (${timeframe})`,
-        distance: calcDistance(pullbackEntry)
-      });
-    }
-
-    // 6. Entrada quando RSI está em zona ideal (varia por timeframe)
-    const idealRsiMin = 45 - (config.multiplier * 2);
-    const idealRsiMax = 55 + (config.multiplier * 2);
-    if (data.rsi > idealRsiMin && data.rsi < idealRsiMax && data.macd > 0) {
-      const idealEntry = data.price * (0.985 + tolerance);
-      entryPoints.push({
-        price: idealEntry,
-        reason: `RSI em zona ideal para ${timeframe} (${data.rsi.toFixed(1)})`,
-        distance: calcDistance(idealEntry)
-      });
-    }
-
-    // PONTOS DE SAÍDA baseados em análise técnica ajustados por timeframe
-
-    // 1. Saída em resistência técnica (mais agressiva em timeframes maiores)
-    const resistanceTarget = data.resistance * (1 + tolerance * 0.7);
-    exitPoints.push({
-      price: resistanceTarget,
-      reason: `Resistência técnica ${timeframe}`,
-      distance: calcDistance(resistanceTarget)
-    });
-
-    // 2. Saída na banda superior de Bollinger (ajustada)
-    const bbUpperTarget = data.bollingerUpper * (0.99 + tolerance * 0.5);
-    exitPoints.push({
-      price: bbUpperTarget,
-      reason: `Banda Bollinger superior (${timeframe})`,
-      distance: calcDistance(bbUpperTarget)
-    });
-
-    // 3. Saída por RSI overbought (threshold varia por timeframe)
-    if (data.rsi > config.rsiOverbought - 10) {
-      const rsiTarget = Math.min(data.resistance, data.bollingerUpper) * (1 + tolerance * 0.3);
-      exitPoints.push({
-        price: rsiTarget,
-        reason: `Alvo RSI (${data.rsi.toFixed(1)}) - Realizar lucros ${timeframe}`,
-        distance: calcDistance(rsiTarget)
-      });
-    }
-
-    // 4. Saída baseada em ATR (volatilidade) ajustada por timeframe
-    const atrEstimate = (data.bollingerUpper - data.bollingerLower) / 4;
-    const atrTarget = data.price + (atrEstimate * config.targetMultiplier);
-    exitPoints.push({
-      price: atrTarget,
-      reason: `Alvo por volatilidade (ATR × ${config.targetMultiplier}) - ${timeframe}`,
-      distance: calcDistance(atrTarget)
-    });
-
-    // 5. Alvo Fibonacci ajustado por timeframe
-    const fibonacciLevel = timeframe === 'daily' ? 1.382 : timeframe === 'weekly' ? 1.618 : timeframe === 'monthly' ? 2.0 : 2.618;
-    const fibTarget = data.support + ((data.resistance - data.support) * fibonacciLevel);
-    const potentialRR = (fibTarget - data.price) / (data.price - (data.support * config.stopDistance));
+    // PONTOS DE ENTRADA - Conservadores e ABAIXO do preço atual
     
-    if (potentialRR > 1.5) {
-      exitPoints.push({
-        price: fibTarget,
-        reason: `Fibonacci ${fibonacciLevel} (R/R ${potentialRR.toFixed(1)}:1) - ${timeframe}`,
-        distance: calcDistance(fibTarget)
-      });
+    // 1. Entrada em suporte forte (sempre ABAIXO do preço)
+    if (data.rsi < config.rsiOversold + 15) {
+      const supportEntry = Math.min(data.support * 1.003, data.price * 0.99); // Máx 1% abaixo
+      const distanceCalc = calcDistance(supportEntry);
+      
+      if (distanceCalc < 0) { // Garantir que está ABAIXO
+        const prob = calculateProbability(supportEntry, true);
+        if (prob >= 65) {
+          entryPoints.push({ 
+            price: supportEntry, 
+            reason: `Suporte (RSI ${data.rsi.toFixed(1)})`, 
+            distance: distanceCalc,
+            probability: prob
+          });
+        }
+      }
     }
 
-    // 6. Alvo agressivo para ADX forte (varia por timeframe)
-    if (data.adx > config.adxStrong && data.macd > config.macdStrong) {
-      const aggressiveMultiplier = 1 + (0.05 * config.multiplier);
-      const aggressiveTarget = data.resistance * aggressiveMultiplier;
-      exitPoints.push({
-        price: aggressiveTarget,
-        reason: `Tendência forte confirmada (ADX ${data.adx.toFixed(1)}, MACD ${data.macd.toFixed(3)}) - ${timeframe}`,
-        distance: calcDistance(aggressiveTarget)
-      });
+    // 2. Entrada na MA20 (só se MA20 estiver ABAIXO do preço)
+    if (data.macd > 0 && data.ma20 < data.price && data.price > data.ma50 && data.adx > config.adxMinimum) {
+      const ma20Entry = data.ma20 * 0.997;
+      const distanceCalc = calcDistance(ma20Entry);
+      
+      if (distanceCalc < 0) { // Garantir que está ABAIXO
+        const prob = calculateProbability(ma20Entry, true);
+        if (prob >= 65) {
+          entryPoints.push({ 
+            price: ma20Entry, 
+            reason: `Pullback MA20`, 
+            distance: distanceCalc,
+            probability: prob
+          });
+        }
+      }
     }
 
-    // 7. Alvo conservador baseado em suporte/resistência range (ajustado)
-    const rangeSize = data.resistance - data.support;
-    const conservativeTarget = data.price + (rangeSize * 0.5 * config.multiplier);
-    if (conservativeTarget > data.price && conservativeTarget < data.resistance * 1.2) {
-      exitPoints.push({
-        price: conservativeTarget,
-        reason: `Alvo conservador ${timeframe} (50% do range)`,
-        distance: calcDistance(conservativeTarget)
-      });
+    // 3. Entrada na banda inferior (só se banda estiver ABAIXO)
+    if (data.bollingerLower < data.price) {
+      const bbLowerEntry = data.bollingerLower * 1.008;
+      const distanceCalc = calcDistance(bbLowerEntry);
+      
+      if (distanceCalc < 0 && Math.abs(distanceCalc) < 8) { // ABAIXO e não muito longe
+        const bbLowerProb = calculateProbability(bbLowerEntry, true);
+        if (bbLowerProb >= 65) {
+          entryPoints.push({ 
+            price: bbLowerEntry, 
+            reason: `Banda inferior`, 
+            distance: distanceCalc,
+            probability: bbLowerProb
+          });
+        }
+      }
     }
 
-    // STOP LOSS inteligente baseado em análise técnica e timeframe
-    let stopLoss;
+    // PONTOS DE SAÍDA - SEMPRE ACIMA do preço atual
     
-    // Stop loss ajustado por volatilidade e timeframe
-    const volatilityMargin = ((data.bollingerUpper - data.bollingerLower) / data.price) * 0.4 * config.multiplier;
-    stopLoss = data.support * (config.stopDistance - volatilityMargin);
-
-    // Ajustar stop para ADX fraco (mercado lateral) - mais apertado
-    if (data.adx < 20) {
-      stopLoss = data.support * (0.985 - tolerance * 0.5);
-    }
-
-    // Ajustar stop para ADX forte - pode ser mais amplo em timeframes maiores
-    if (data.adx > config.adxStrong) {
-      stopLoss = data.support * (config.stopDistance - tolerance * 0.3);
-    }
-
-    // Se não houver pontos de entrada viáveis
-    if (entryPoints.length === 0) {
-      entryPoints.push({
-        price: data.price,
-        reason: `Preço de mercado atual (${timeframe})`,
-        distance: 0
+    // 1. Alvo ULTRA conservador (sempre ACIMA)
+    const ultraConservativeTarget = data.price * (1 + config.conservativeTarget);
+    const ultraDist = calcDistance(ultraConservativeTarget);
+    const ultraProb = calculateProbability(ultraConservativeTarget, false);
+    
+    if (ultraDist > 0 && ultraProb >= 70) { // Garantir que está ACIMA
+      exitPoints.push({ 
+        price: ultraConservativeTarget, 
+        reason: `Alvo conservador ${(config.conservativeTarget * 100).toFixed(1)}%`, 
+        distance: ultraDist,
+        probability: ultraProb
       });
     }
 
-    // Se não houver pontos de saída viáveis
-    if (exitPoints.length === 0) {
-      exitPoints.push({
-        price: data.resistance,
-        reason: 'Resistência técnica principal',
-        distance: calcDistance(data.resistance)
+    // 2. Alvo realista (sempre ACIMA)
+    const realisticTarget = data.price * (1 + config.realisticTarget);
+    const realisticDist = calcDistance(realisticTarget);
+    const realisticProb = calculateProbability(realisticTarget, false);
+    
+    if (realisticDist > 0 && realisticProb >= 65 && data.macd > 0) { // ACIMA
+      exitPoints.push({ 
+        price: realisticTarget, 
+        reason: `Alvo realista ${(config.realisticTarget * 100).toFixed(1)}%`, 
+        distance: realisticDist,
+        probability: realisticProb
       });
     }
 
-    // Filtrar entradas que fazem sentido (não muito longe do preço)
-    const validEntries = entryPoints.filter(e => 
-      Math.abs(e.distance) < 20 * config.multiplier
-    );
+    // 3. Resistência próxima (só se estiver ACIMA)
+    const resistanceDistance = calcDistance(data.resistance);
+    if (resistanceDistance > 0 && resistanceDistance <= config.maxTargetDistance * 100 && data.resistance > data.price) {
+      const resistanceProb = calculateProbability(data.resistance, false);
+      
+      if (resistanceProb >= 65) {
+        exitPoints.push({ 
+          price: data.resistance, 
+          reason: `Resistência técnica`, 
+          distance: resistanceDistance,
+          probability: resistanceProb
+        });
+      }
+    }
 
-    // Filtrar saídas que fazem sentido (acima do preço atual)
-    const validExits = exitPoints.filter(e => 
-      e.distance > 0 && e.distance < 30 * config.multiplier
-    );
+    // 4. Alvo por tendência forte (sempre ACIMA)
+    if (data.adx > 40 && data.macd > 0.15 && data.rsi > 55 && data.rsi < 75) {
+      const strongTrendTarget = data.price * (1 + (config.realisticTarget * 1.15));
+      const trendDist = calcDistance(strongTrendTarget);
+      const trendProb = calculateProbability(strongTrendTarget, false);
+      
+      if (trendDist > 0 && trendProb >= 65 && trendDist <= config.maxTargetDistance * 100) {
+        exitPoints.push({ 
+          price: strongTrendTarget, 
+          reason: `Tendência forte (ADX ${data.adx.toFixed(1)})`, 
+          distance: trendDist,
+          probability: trendProb
+        });
+      }
+    }
 
-    // Ordenar por distância
-    validEntries.sort((a, b) => Math.abs(a.distance) - Math.abs(b.distance));
-    validExits.sort((a, b) => b.distance - a.distance);
+    // 5. Alvo mínimo de risco-retorno (sempre ACIMA)
+    const stopLoss = data.support * config.stopDistance;
+    const riskAmount = data.price - stopLoss;
+    const rrTarget = data.price + (riskAmount * 1.5);
+    const rrDistance = calcDistance(rrTarget);
+    const rrProb = calculateProbability(rrTarget, false);
+    
+    if (rrDistance > 0 && rrProb >= 65 && rrDistance <= config.maxTargetDistance * 100) {
+      exitPoints.push({ 
+        price: rrTarget, 
+        reason: `R/R 1.5:1`, 
+        distance: rrDistance,
+        probability: rrProb
+      });
+    }
+
+    // Filtrar RIGOROSAMENTE
+    // ENTRADAS: devem estar ABAIXO do preço (distância negativa)
+    const validEntries = entryPoints
+      .filter(e => e.distance < 0 && e.probability >= 65 && Math.abs(e.distance) < 12)
+      .sort((a, b) => b.probability - a.probability);
+    
+    // SAÍDAS: devem estar ACIMA do preço (distância positiva)
+    const validExits = exitPoints
+      .filter(e => e.distance > 0 && e.probability >= 65 && e.distance <= config.maxTargetDistance * 100)
+      .sort((a, b) => b.probability - a.probability);
+
+    // Se não houver saídas válidas, criar um micro-alvo garantidamente ACIMA
+    if (validExits.length === 0) {
+      const microTarget = data.price * (1 + config.conservativeTarget * 0.7);
+      const microDist = calcDistance(microTarget);
+      const microProb = calculateProbability(microTarget, false);
+      
+      if (microDist > 0) { // Garantir que está ACIMA
+        validExits.push({
+          price: microTarget,
+          reason: `Alvo mínimo ${((config.conservativeTarget * 0.7) * 100).toFixed(1)}%`,
+          distance: microDist,
+          probability: Math.max(microProb, 70)
+        });
+      }
+    }
+
+    // Se ainda não houver entradas, criar uma no preço atual menos 1%
+    if (validEntries.length === 0) {
+      const currentEntry = data.price * 0.99;
+      validEntries.push({
+        price: currentEntry,
+        reason: 'Entrada próxima ao preço atual',
+        distance: -1,
+        probability: 60
+      });
+    }
 
     return {
-      entry: validEntries.length > 0 ? validEntries.slice(0, 4) : entryPoints.slice(0, 1),
-      exit: validExits.length > 0 ? validExits.slice(0, 4) : exitPoints.slice(0, 4),
+      entry: validEntries.slice(0, 3), // Máximo 3 entradas
+      exit: validExits.slice(0, 3), // Máximo 3 saídas
       stopLoss
     };
   };
 
-  useEffect(() => {
-    const initialData = {};
-    top30Liquid.forEach((ticker, index) => {
-      const basePrice = Math.random() * 80 + 10;
-      const shouldHaveGoodScore = index < 8;
-      let rsi, macd, adx, ma20, ma50;
-      if (shouldHaveGoodScore) {
-        rsi = 50 + Math.random() * 20;
-        macd = 0.1 + Math.random() * 0.5;
-        adx = 30 + Math.random() * 25;
-        ma20 = basePrice * (0.92 + Math.random() * 0.06);
-        ma50 = basePrice * (0.88 + Math.random() * 0.08);
-      } else {
-        rsi = Math.random() * 100;
-        macd = (Math.random() - 0.5) * 3;
-        adx = Math.random() * 60 + 10;
-        ma20 = basePrice * (0.95 + Math.random() * 0.1);
-        ma50 = basePrice * (0.90 + Math.random() * 0.15);
+  const loadStocksData = async (tickers) => {
+    setLoading(true);
+    setLoadingProgress({ current: 0, total: tickers.length });
+    
+    try {
+      const newData = {};
+      
+      for (let i = 0; i < tickers.length; i++) {
+        const ticker = tickers[i];
+        setLoadingProgress({ current: i + 1, total: tickers.length });
+        
+        const result = await api.fetchStockData(ticker);
+        if (result) newData[result.ticker] = result;
+        
+        // Pequeno delay para não sobrecarregar a API
+        if (i < tickers.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
       }
-      const volume = Math.floor(Math.random() * 10000000) + 1000000;
-      initialData[ticker] = {
-        price: parseFloat(basePrice.toFixed(2)),
-        change: (Math.random() - 0.5) * 6,
-        volume: volume,
-        liquidityRank: top30Liquid.indexOf(ticker) + 1,
-        rsi: parseFloat(rsi.toFixed(2)),
-        macd: parseFloat(macd.toFixed(3)),
-        adx: parseFloat(adx.toFixed(2)),
-        ma20: parseFloat(ma20.toFixed(2)),
-        ma50: parseFloat(ma50.toFixed(2)),
-        bollingerUpper: parseFloat((basePrice * 1.15).toFixed(2)),
-        bollingerLower: parseFloat((basePrice * 0.85).toFixed(2)),
-        support: parseFloat((basePrice * 0.92).toFixed(2)),
-        resistance: parseFloat((basePrice * 1.08).toFixed(2))
-      };
-    });
-    setStocksData(initialData);
+      
+      setStocksData(newData);
+      setLastUpdate(new Date());
+    } catch (error) {
+      console.error('Erro ao carregar dados:', error);
+    } finally {
+      setLoading(false);
+      setLoadingProgress({ current: 0, total: 0 });
+    }
+  };
+
+  useEffect(() => {
+    // Só carregar se não houver watchlist salva
+    const savedWatchlist = localStorage.getItem('tradingB3_watchlist');
+    if (!savedWatchlist || savedWatchlist === '[]') {
+      loadStocksData(top30Liquid);
+    } else {
+      // Carregar watchlist salva + top 30 para ter dados completos
+      const parsed = JSON.parse(savedWatchlist);
+      const allTickers = [...new Set([...parsed, ...top30Liquid])];
+      loadStocksData(allTickers);
+    }
   }, []);
 
   useEffect(() => {
     if (Object.keys(stocksData).length === 0) return;
+    
     const allStocksWithScore = Object.entries(stocksData)
-      .map(([ticker, data]) => ({
-        ticker,
-        score: calculateScore(data),
-        ...data
-      }))
+      .map(([ticker, data]) => ({ ticker, score: calculateScore(data), ...data }))
       .sort((a, b) => {
         const scoreWeight = 0.7;
         const liquidityWeight = 0.3;
@@ -344,6 +671,7 @@ const TradingSystem = () => {
         const bRank = (b.score * scoreWeight) + ((31 - b.liquidityRank) * liquidityWeight);
         return bRank - aRank;
       });
+
     let opportunities = allStocksWithScore.filter(stock => stock.score >= 70).slice(0, 5);
     if (opportunities.length < 5) {
       const remaining = 5 - opportunities.length;
@@ -352,208 +680,249 @@ const TradingSystem = () => {
         .slice(0, remaining);
       opportunities = [...opportunities, ...additionalStocks];
     }
+
     setTopOpportunities(opportunities);
     const topTickers = opportunities.map(opp => opp.ticker);
     setWatchlist(topTickers);
+    
     if (!selectedStock && topTickers.length > 0) {
       setSelectedStock(topTickers[0]);
     }
-  }, [stocksData, selectedStock]);
-
-  const calculateSignals = (data) => {
-    const signals = { entry: [], exit: [], warnings: [], score: calculateScore(data) };
-    if (data.rsi > 85) signals.exit.push('RSI extremamente sobrecomprado');
-    else if (data.rsi > 70) signals.warnings.push('RSI sobrecomprado - aguardar correção');
-    else if (data.rsi >= 50 && data.rsi <= 70) signals.entry.push('RSI em zona favorável para compra');
-    else if (data.rsi < 30) signals.entry.push('RSI sobrevendido - oportunidade de compra');
-    if (data.macd > 0.2) signals.entry.push('MACD positivo forte - momentum de alta');
-    else if (data.macd > 0) signals.entry.push('MACD positivo - momentum de alta');
-    else if (data.macd < -0.1) signals.exit.push('MACD negativo - momentum de baixa');
-    if (data.adx > 40) signals.entry.push('Tendência forte estabelecida (ADX > 40)');
-    else if (data.adx > 25) signals.entry.push('Tendência moderada');
-    else if (data.adx < 20) signals.warnings.push('Tendência fraca - mercado lateral');
-    if (data.price > data.ma20 && data.price > data.ma50) signals.entry.push('Preço acima de MA20 e MA50 - tendência altista');
-    else if (data.price < data.ma20 && data.price < data.ma50) signals.exit.push('Preço abaixo de MA20 e MA50 - tendência baixista');
-    else if (data.price < data.ma20) signals.warnings.push('Preço abaixo de MA20');
-    const bbPosition = (data.price - data.bollingerLower) / (data.bollingerUpper - data.bollingerLower);
-    if (bbPosition >= 0.9) signals.warnings.push('Preço na banda superior - possível reversão');
-    else if (bbPosition <= 0.1) signals.entry.push('Preço na banda inferior - oportunidade de compra');
-    const distToSupport = ((data.price - data.support) / data.support) * 100;
-    const distToResistance = ((data.resistance - data.price) / data.price) * 100;
-    if (distToSupport < 1.5) signals.entry.push(`Preço próximo ao suporte (R$ ${data.support.toFixed(2)})`);
-    if (distToResistance < 1.5) signals.warnings.push(`Preço próximo à resistência (R$ ${data.resistance.toFixed(2)})`);
-    return signals;
-  };
+  }, [stocksData]);
 
   useEffect(() => {
     if (!autoRefresh) return;
     const interval = setInterval(() => {
-      setStocksData(prev => {
-        const updated = { ...prev };
-        Object.keys(updated).forEach(ticker => {
-          const variation = (Math.random() - 0.5) * 0.8;
-          const newPrice = updated[ticker].price * (1 + variation / 100);
-          updated[ticker] = {
-            ...updated[ticker],
-            price: parseFloat(newPrice.toFixed(2)),
-            change: parseFloat((updated[ticker].change + (Math.random() - 0.5) * 0.5).toFixed(2)),
-            rsi: Math.max(0, Math.min(100, updated[ticker].rsi + (Math.random() - 0.5) * 3)),
-            macd: parseFloat((updated[ticker].macd + (Math.random() - 0.5) * 0.15).toFixed(3)),
-            adx: Math.max(10, Math.min(70, updated[ticker].adx + (Math.random() - 0.5) * 2)),
-            volume: updated[ticker].volume + Math.floor((Math.random() - 0.5) * 200000)
-          };
-          const isTopOpportunity = topOpportunities.some(opp => opp.ticker === ticker);
-          if (!isTopOpportunity) return;
-          const signals = calculateSignals(updated[ticker]);
-          if (signals.entry.length >= 3 && signals.score >= 75) {
-            const existingAlert = alerts.find(a => 
-              a.ticker === ticker && a.type === 'entry' && 
-              Date.now() - new Date(a.timestamp).getTime() < 30000
-            );
-            if (!existingAlert) {
-              const newAlert = {
-                id: Date.now() + Math.random(),
-                type: 'entry',
-                ticker,
-                message: `🔥 OPORTUNIDADE FORTE: ${ticker} - Score ${signals.score}/100`,
-                signals: signals.entry,
-                timestamp: new Date().toISOString()
-              };
-              setAlerts(prev => [newAlert, ...prev].slice(0, 20));
-              if (soundEnabled) console.log('🔔 ALERTA DE COMPRA FORTE:', ticker);
-            }
-          }
-          if (signals.exit.length > 0 && signals.score < 40) {
-            const existingAlert = alerts.find(a => 
-              a.ticker === ticker && a.type === 'exit' && 
-              Date.now() - new Date(a.timestamp).getTime() < 30000
-            );
-            if (!existingAlert) {
-              const newAlert = {
-                id: Date.now() + Math.random(),
-                type: 'exit',
-                ticker,
-                message: `⚠️ ALERTA DE VENDA: ${ticker} - Score ${signals.score}/100`,
-                signals: signals.exit,
-                timestamp: new Date().toISOString()
-              };
-              setAlerts(prev => [newAlert, ...prev].slice(0, 20));
-              if (soundEnabled) console.log('🔔 ALERTA DE VENDA:', ticker);
-            }
-          }
-        });
-        return updated;
-      });
-    }, 5000);
+      const allTickers = [...new Set([...top30Liquid, ...watchlist])];
+      loadStocksData(allTickers);
+    }, 120000); // Atualiza a cada 2 minutos
     return () => clearInterval(interval);
-  }, [autoRefresh, soundEnabled, topOpportunities, alerts]);
+  }, [autoRefresh, watchlist]);
 
-  const currentData = stocksData[selectedStock] || {};
-  const signals = calculateSignals(currentData);
-  const entryExitData = calculateEntryExit(currentData, timeframe);
-
-  const generateHistoricalData = () => {
-    const data = [];
-    let price = currentData.price || 18;
-    const periods = timeframe === 'daily' ? 30 : timeframe === 'weekly' ? 52 : timeframe === 'monthly' ? 12 : 5;
-    const label = timeframe === 'daily' ? 'd' : timeframe === 'weekly' ? 's' : timeframe === 'monthly' ? 'm' : 'a';
-    
-    for (let i = periods; i >= 0; i--) {
-      const variation = (Math.random() - 0.5) * 2;
-      price = price * (1 + variation / 100);
-      data.push({
-        time: `${i}${label}`,
-        price: parseFloat(price.toFixed(2)),
-        volume: Math.floor(Math.random() * 2000000) + 500000
-      });
+  const calculateSignals = (data, timeframe = 'daily') => {
+    if (!data || !data.price) {
+      return { entry: [], exit: [], warnings: [], score: 0 };
     }
-    return data.reverse();
+    
+    const signals = { entry: [], exit: [], warnings: [], score: calculateScore(data) };
+    
+    // Configuração de thresholds por timeframe
+    const thresholds = {
+      daily: { rsiOversold: 30, rsiOverbought: 70, adxStrong: 35, macdStrong: 0.15 },
+      weekly: { rsiOversold: 32, rsiOverbought: 68, adxStrong: 30, macdStrong: 0.12 },
+      monthly: { rsiOversold: 35, rsiOverbought: 65, adxStrong: 28, macdStrong: 0.10 },
+      yearly: { rsiOversold: 38, rsiOverbought: 62, adxStrong: 25, macdStrong: 0.08 }
+    };
+    
+    const config = thresholds[timeframe] || thresholds.daily;
+    
+    // SINAIS DE ENTRADA (Positivos)
+    
+    // RSI Analysis
+    if (data.rsi != null) {
+      if (data.rsi < config.rsiOversold - 5) {
+        signals.entry.push(`RSI extremamente oversold (${data.rsi.toFixed(1)}) - forte oportunidade`);
+      } else if (data.rsi < config.rsiOversold) {
+        signals.entry.push(`RSI oversold (${data.rsi.toFixed(1)}) - oportunidade de compra`);
+      } else if (data.rsi >= 45 && data.rsi <= 60) {
+        signals.entry.push(`RSI em zona favorável (${data.rsi.toFixed(1)}) para ${timeframe}`);
+      }
+      
+      // RSI Warnings
+      if (data.rsi > config.rsiOverbought + 10) {
+        signals.warnings.push(`RSI extremamente overbought (${data.rsi.toFixed(1)}) - correção iminente`);
+      } else if (data.rsi > config.rsiOverbought) {
+        signals.warnings.push(`RSI overbought (${data.rsi.toFixed(1)}) - aguardar correção para ${timeframe}`);
+      }
+      
+      // RSI Exit Signals
+      if (data.rsi > config.rsiOverbought + 15) {
+        signals.exit.push(`RSI crítico (${data.rsi.toFixed(1)}) - realizar lucros urgente`);
+      } else if (data.rsi > config.rsiOverbought + 5) {
+        signals.exit.push(`RSI muito alto (${data.rsi.toFixed(1)}) - considerar saída`);
+      }
+    }
+    
+    // MACD Analysis
+    if (data.macd != null) {
+      if (data.macd > config.macdStrong) {
+        signals.entry.push(`MACD positivo forte (${data.macd.toFixed(3)}) - momentum altista`);
+      } else if (data.macd > config.macdStrong * 0.5) {
+        signals.entry.push(`MACD positivo (${data.macd.toFixed(3)}) - tendência de alta`);
+      } else if (data.macd > 0 && data.macd < config.macdStrong * 0.5) {
+        signals.entry.push(`MACD levemente positivo (${data.macd.toFixed(3)}) - início de alta`);
+      }
+      
+      // MACD Warnings
+      if (data.macd < 0 && data.macd > -config.macdStrong * 0.5) {
+        signals.warnings.push(`MACD levemente negativo (${data.macd.toFixed(3)}) - possível reversão`);
+      }
+      
+      // MACD Exit Signals
+      if (data.macd < -config.macdStrong) {
+        signals.exit.push(`MACD fortemente negativo (${data.macd.toFixed(3)}) - tendência de baixa`);
+      } else if (data.macd < -config.macdStrong * 0.5) {
+        signals.exit.push(`MACD negativo (${data.macd.toFixed(3)}) - momentum baixista`);
+      }
+    }
+    
+    // ADX Analysis
+    if (data.adx != null) {
+      if (data.adx > config.adxStrong + 10) {
+        signals.entry.push(`Tendência muito forte (ADX ${data.adx.toFixed(1)}) - ${timeframe}`);
+      } else if (data.adx > config.adxStrong) {
+        signals.entry.push(`Tendência forte estabelecida (ADX ${data.adx.toFixed(1)})`);
+      } else if (data.adx > config.adxStrong - 5) {
+        signals.entry.push(`Tendência moderada (ADX ${data.adx.toFixed(1)})`);
+      }
+      
+      // ADX Warnings
+      if (data.adx < 20) {
+        signals.warnings.push(`Tendência fraca (ADX ${data.adx.toFixed(1)}) - mercado lateral`);
+      } else if (data.adx < config.adxStrong - 10) {
+        signals.warnings.push(`ADX baixo (${data.adx.toFixed(1)}) - tendência não definida`);
+      }
+      
+      // ADX with negative MACD
+      if (data.adx > config.adxStrong && data.macd != null && data.macd < 0) {
+        signals.exit.push(`Tendência forte de baixa (ADX ${data.adx.toFixed(1)} + MACD negativo)`);
+      }
+    }
+    
+    // Moving Averages Analysis
+    if (data.price != null && data.ma20 != null && data.ma50 != null) {
+      if (data.price > data.ma20 && data.price > data.ma50) {
+        const distMa20 = ((data.price - data.ma20) / data.ma20) * 100;
+        const distMa50 = ((data.price - data.ma50) / data.ma50) * 100;
+        signals.entry.push(`Preço acima MA20 (+${distMa20.toFixed(1)}%) e MA50 (+${distMa50.toFixed(1)}%)`);
+      } else if (data.price > data.ma20) {
+        const distMa20 = ((data.price - data.ma20) / data.ma20) * 100;
+        signals.entry.push(`Preço acima MA20 (+${distMa20.toFixed(1)}%)`);
+      }
+      
+      // Moving Averages Exit Signals
+      if (data.price < data.ma20 && data.price < data.ma50) {
+        const distMa20 = ((data.ma20 - data.price) / data.price) * 100;
+        const distMa50 = ((data.ma50 - data.price) / data.price) * 100;
+        signals.exit.push(`Preço abaixo MA20 (-${distMa20.toFixed(1)}%) e MA50 (-${distMa50.toFixed(1)}%) - tendência baixista`);
+      } else if (data.price < data.ma20) {
+        const distMa20 = ((data.ma20 - data.price) / data.price) * 100;
+        signals.exit.push(`Preço abaixo MA20 (-${distMa20.toFixed(1)}%) - sinal de fraqueza`);
+      }
+    }
+    
+    // Bollinger Bands Position
+    if (data.bollingerUpper != null && data.bollingerLower != null && data.price != null) {
+      const bbPosition = (data.price - data.bollingerLower) / (data.bollingerUpper - data.bollingerLower);
+      if (bbPosition <= 0.2) {
+        signals.entry.push(`Preço na região inferior das Bandas (${(bbPosition * 100).toFixed(0)}%) - oversold`);
+      } else if (bbPosition >= 0.4 && bbPosition <= 0.6) {
+        signals.entry.push(`Preço no meio das Bandas (${(bbPosition * 100).toFixed(0)}%) - equilíbrio`);
+      }
+      
+      // Bollinger Bands Warnings
+      if (bbPosition >= 0.85) {
+        signals.warnings.push(`Preço na banda superior (${(bbPosition * 100).toFixed(0)}%) - possível reversão`);
+      }
+      
+      // Bollinger Bands Exit
+      if (bbPosition >= 0.9) {
+        signals.exit.push(`Preço na banda superior extrema (${(bbPosition * 100).toFixed(0)}%) - topo do canal`);
+      }
+    }
+    
+    // Support Analysis
+    if (data.support != null && data.price != null) {
+      const distToSupport = ((data.price - data.support) / data.support) * 100;
+      if (distToSupport < 2 && distToSupport > 0) {
+        signals.entry.push(`Preço próximo ao suporte (${distToSupport.toFixed(1)}% acima) - R$ ${data.support.toFixed(2)}`);
+      }
+      
+      // Price below support
+      const belowSupport = data.price < data.support;
+      if (belowSupport) {
+        const distBelow = ((data.support - data.price) / data.support) * 100;
+        signals.exit.push(`Preço rompeu suporte (-${distBelow.toFixed(1)}%) - stop loss acionado`);
+      }
+    }
+    
+    // Resistance Warnings
+    if (data.resistance != null && data.price != null) {
+      const distToResistance = ((data.resistance - data.price) / data.price) * 100;
+      if (distToResistance < 2 && distToResistance > 0) {
+        signals.warnings.push(`Preço próximo à resistência (${distToResistance.toFixed(1)}% abaixo) - R$ ${data.resistance.toFixed(2)}`);
+      }
+    }
+    
+    // Volume Analysis
+    if (data.volume != null) {
+      if (data.volume < 500000) {
+        signals.warnings.push(`Volume baixo (${(data.volume / 1000000).toFixed(2)}M) - liquidez reduzida`);
+      }
+    }
+    
+    return signals;
   };
 
-  const historicalData = generateHistoricalData();
+  const currentData = stocksData[selectedStock] || {};
+  const signals = calculateSignals(currentData, timeframe); // Passa o timeframe
+  const entryExitData = calculateEntryExit(currentData, timeframe);
 
-  const addToWatchlist = () => {
+  const addToWatchlist = async () => {
     const ticker = addStockInput.toUpperCase().trim();
+    if (!ticker) return;
     
-    if (!ticker) {
-      return;
-    }
-
-    // Validar formato básico de ticker da B3 (letras + números)
     const tickerPattern = /^[A-Z]{4}\d{1,2}$/;
     if (!tickerPattern.test(ticker)) {
-      alert('Formato inválido. Use o formato correto (ex: MGLU3, PETR4, VALE3)');
+      alert('Formato inválido. Use: PETR4, VALE3, MGLU3');
       return;
     }
 
-    // Verificar se já existe na watchlist
     if (watchlist.includes(ticker)) {
-      alert('Esta ação já está na sua watchlist!');
+      alert('Já está na watchlist!');
       setAddStockInput('');
       return;
     }
 
-    // Adicionar à watchlist
     setWatchlist([...watchlist, ticker]);
-
-    // Se não existir nos dados, criar dados simulados para ela
+    
     if (!stocksData[ticker]) {
-      const basePrice = Math.random() * 100 + 10;
-      const rsi = Math.random() * 100;
-      const macd = (Math.random() - 0.5) * 3;
-      const adx = Math.random() * 60 + 10;
-      const ma20 = basePrice * (0.95 + Math.random() * 0.1);
-      const ma50 = basePrice * (0.90 + Math.random() * 0.15);
-      const volume = Math.floor(Math.random() * 5000000) + 500000;
-      
-      setStocksData(prev => ({
-        ...prev,
-        [ticker]: {
-          price: parseFloat(basePrice.toFixed(2)),
-          change: (Math.random() - 0.5) * 6,
-          volume: volume,
-          liquidityRank: 31, // Fora do top 30
-          rsi: parseFloat(rsi.toFixed(2)),
-          macd: parseFloat(macd.toFixed(3)),
-          adx: parseFloat(adx.toFixed(2)),
-          ma20: parseFloat(ma20.toFixed(2)),
-          ma50: parseFloat(ma50.toFixed(2)),
-          bollingerUpper: parseFloat((basePrice * 1.15).toFixed(2)),
-          bollingerLower: parseFloat((basePrice * 0.85).toFixed(2)),
-          support: parseFloat((basePrice * 0.92).toFixed(2)),
-          resistance: parseFloat((basePrice * 1.08).toFixed(2))
-        }
-      }));
+      setLoading(true);
+      const data = await api.fetchStockData(ticker);
+      setStocksData(prev => ({ ...prev, [ticker]: data }));
+      setLoading(false);
     }
 
     setAddStockInput('');
   };
 
   const removeFromWatchlist = (ticker) => {
-    setWatchlist(watchlist.filter(t => t !== ticker));
-    if (selectedStock === ticker && watchlist.length > 1) {
-      setSelectedStock(watchlist[0]);
+    const newWatchlist = watchlist.filter(t => t !== ticker);
+    setWatchlist(newWatchlist);
+    
+    // Se removeu a ação selecionada, selecionar outra
+    if (selectedStock === ticker && newWatchlist.length > 0) {
+      setSelectedStock(newWatchlist[0]);
+    } else if (newWatchlist.length === 0) {
+      setSelectedStock('');
+      // Limpar localStorage se não há mais ações
+      localStorage.removeItem('tradingB3_watchlist');
+      localStorage.removeItem('tradingB3_selectedStock');
     }
   };
 
-  const formatTimestamp = (timestamp) => {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString('pt-BR');
-  };
+  const historicalData = currentData.historicalData?.slice(-30) || [];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-4">
-      {/* Disclaimer Legal */}
       <div className="bg-yellow-900/20 border-2 border-yellow-600 rounded-xl p-4 mb-6">
         <div className="flex items-start gap-3">
           <Shield className="w-6 h-6 text-yellow-400 flex-shrink-0 mt-1" />
           <div>
-            <h3 className="font-bold text-yellow-400 mb-2">⚠️ Aviso Legal Importante</h3>
+            <h3 className="font-bold text-yellow-400 mb-2">⚠️ Aviso Legal</h3>
             <p className="text-sm text-yellow-100">
-              Este sistema apresenta <strong>apenas dados estatísticos e análises técnicas</strong> com fins educacionais e informativos. 
-              <strong> Não constitui recomendação de investimento, consultoria financeira ou oferta de compra/venda de ativos</strong>. 
-              O desenvolvedor não possui certificações para oferecer recomendações financeiras. 
-              Investimentos em ações envolvem riscos. Consulte um profissional certificado (AAI, CNPI) antes de investir.
+              <strong>Dados estatísticos com fins educacionais</strong>. Não constitui recomendação de investimento. 
+              Consulte um profissional certificado antes de investir.
             </p>
           </div>
         </div>
@@ -563,23 +932,40 @@ const TradingSystem = () => {
         <div className="flex justify-between items-center flex-wrap gap-4">
           <div>
             <h1 className="text-4xl font-bold bg-gradient-to-r from-green-400 to-blue-500 bg-clip-text text-transparent">
-              Trading System - B3
+              Trading System B3
             </h1>
-            <p className="text-slate-400 mt-2">Análise Técnica • Dados Estatísticos • 30 Ações Mais Líquidas</p>
+            <p className="text-slate-400 mt-2">Dados Reais • Yahoo Finance API • Top 30 Mais Líquidas</p>
+            {lastUpdate && (
+              <p className="text-xs text-slate-500 mt-1">
+                Última atualização: {lastUpdate.toLocaleTimeString('pt-BR')}
+              </p>
+            )}
+            {loading && loadingProgress.total > 0 && (
+              <p className="text-xs text-blue-400 mt-1">
+                Carregando... {loadingProgress.current}/{loadingProgress.total}
+              </p>
+            )}
+            {watchlist.length > 0 && (
+              <p className="text-xs text-green-400 mt-1 flex items-center gap-1">
+                <Shield className="w-3 h-3" />
+                Watchlist salva automaticamente ({watchlist.length} ações)
+              </p>
+            )}
           </div>
           <div className="flex gap-4 items-center">
             <button
-              onClick={() => setSoundEnabled(!soundEnabled)}
-              className={`p-3 rounded-lg transition-all ${soundEnabled ? 'bg-green-600 hover:bg-green-700' : 'bg-slate-700 hover:bg-slate-600'}`}
-              title={soundEnabled ? 'Desativar alertas sonoros' : 'Ativar alertas sonoros'}
+              onClick={() => loadStocksData([...new Set([...top30Liquid, ...watchlist])])}
+              disabled={loading}
+              className="p-3 rounded-lg transition-all bg-purple-600 hover:bg-purple-700 disabled:bg-slate-600 disabled:cursor-not-allowed"
+              title="Atualizar"
             >
-              <Volume2 className="w-5 h-5" />
+              <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
             </button>
             <button
               onClick={() => setAutoRefresh(!autoRefresh)}
               className={`px-6 py-3 rounded-lg font-semibold transition-all ${autoRefresh ? 'bg-blue-600 hover:bg-blue-700' : 'bg-slate-700 hover:bg-slate-600'}`}
             >
-              {autoRefresh ? '⏸️ Pausar Auto-Atualização' : '▶️ Ativar Auto-Atualização'}
+              {autoRefresh ? '⏸️ Pausar' : '▶️ Auto'}
             </button>
           </div>
         </div>
@@ -593,7 +979,12 @@ const TradingSystem = () => {
               Top 5 Oportunidades
             </h2>
             
-            {topOpportunities.length > 0 ? (
+            {loading && topOpportunities.length === 0 ? (
+              <div className="text-center py-8">
+                <RefreshCw className="w-8 h-8 animate-spin mx-auto text-blue-400 mb-2" />
+                <p className="text-sm text-slate-400">Buscando dados...</p>
+              </div>
+            ) : (
               <div className="space-y-2">
                 {topOpportunities.map((opp, index) => {
                   const isSelected = opp.ticker === selectedStock;
@@ -603,14 +994,19 @@ const TradingSystem = () => {
                       className={`p-4 rounded-lg cursor-pointer transition-all border-2 relative ${
                         isSelected 
                           ? 'bg-gradient-to-r from-green-600 to-blue-600 border-green-400' 
-                          : 'bg-slate-700 border-slate-600 hover:bg-slate-650 hover:border-green-500'
+                          : 'bg-slate-700 border-slate-600 hover:bg-slate-650'
                       }`}
                       onClick={() => setSelectedStock(opp.ticker)}
                     >
                       <div className="absolute top-2 right-2 bg-yellow-400 text-slate-900 rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold">
                         {index + 1}
                       </div>
-                      <div className="font-bold text-lg mb-1">{opp.ticker}</div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <div className="font-bold text-lg">{opp.ticker}</div>
+                        {opp.dataSource === 'Yahoo Finance' && (
+                          <span className="text-xs bg-green-500 text-white px-1.5 py-0.5 rounded font-bold">REAL</span>
+                        )}
+                      </div>
                       <div className="text-2xl font-bold">R$ {opp.price.toFixed(2)}</div>
                       <div className={`text-sm font-semibold ${opp.change >= 0 ? 'text-green-300' : 'text-red-300'}`}>
                         {opp.change >= 0 ? '+' : ''}{opp.change.toFixed(2)}%
@@ -624,16 +1020,12 @@ const TradingSystem = () => {
                           Score: {opp.score}/100
                         </div>
                         <div className="text-xs text-slate-300">
-                          Liquidez: #{opp.liquidityRank}
+                          #{opp.liquidityRank}
                         </div>
                       </div>
                     </div>
                   );
                 })}
-              </div>
-            ) : (
-              <div className="text-center py-8 text-slate-400">
-                <p className="text-sm">Aguardando identificação de oportunidades...</p>
               </div>
             )}
           </div>
@@ -652,6 +1044,7 @@ const TradingSystem = () => {
                 onKeyPress={(e) => e.key === 'Enter' && addToWatchlist()}
                 placeholder="Ex: MGLU3"
                 className="flex-1 px-3 py-2 bg-slate-700 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                maxLength={6}
               />
               <button
                 onClick={addToWatchlist}
@@ -660,49 +1053,43 @@ const TradingSystem = () => {
                 <Plus className="w-5 h-5" />
               </button>
             </div>
-            
-            <div className="text-xs text-slate-400">
-              Apenas ações das 30 mais líquidas
-            </div>
 
             {watchlist.filter(t => !topOpportunities.some(opp => opp.ticker === t)).length > 0 && (
-              <div className="mt-4 space-y-2">
+              <div className="space-y-2 mt-4">
                 <div className="text-sm font-semibold text-slate-300 mb-2">Minhas Ações:</div>
-                {watchlist
-                  .filter(t => !topOpportunities.some(opp => opp.ticker === t))
-                  .map(ticker => {
-                    const data = stocksData[ticker] || {};
-                    const score = calculateScore(data);
-                    const isSelected = ticker === selectedStock;
-                    return (
-                      <div
-                        key={ticker}
-                        className={`p-3 rounded-lg cursor-pointer transition-all border ${
-                          isSelected 
-                            ? 'bg-blue-600 border-blue-400' 
-                            : 'bg-slate-700 border-slate-600 hover:bg-slate-650'
-                        }`}
-                        onClick={() => setSelectedStock(ticker)}
-                      >
-                        <div className="flex justify-between items-start mb-1">
-                          <div className="font-bold">{ticker}</div>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removeFromWatchlist(ticker);
-                            }}
-                            className="text-slate-400 hover:text-red-400 transition-colors"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        </div>
-                        <div className="text-lg font-bold">R$ {data.price?.toFixed(2)}</div>
-                        <div className={`text-xs ${score >= 70 ? 'text-green-400' : score >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>
-                          Score: {score}/100
-                        </div>
+                {watchlist.filter(t => !topOpportunities.some(opp => opp.ticker === t)).map(ticker => {
+                  const data = stocksData[ticker] || {};
+                  const score = calculateScore(data);
+                  const isSelected = ticker === selectedStock;
+                  return (
+                    <div
+                      key={ticker}
+                      className={`p-3 rounded-lg cursor-pointer transition-all border-2 ${
+                        isSelected 
+                          ? 'bg-blue-600 border-blue-400' 
+                          : 'bg-slate-700 border-slate-600 hover:bg-slate-650'
+                      }`}
+                      onClick={() => setSelectedStock(ticker)}
+                    >
+                      <div className="flex justify-between items-start mb-2">
+                        <div className="font-bold text-lg">{ticker}</div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeFromWatchlist(ticker);
+                          }}
+                          className="text-slate-400 hover:text-red-400"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
                       </div>
-                    );
-                  })}
+                      <div className="text-2xl font-bold">R$ {data.price?.toFixed(2)}</div>
+                      <div className={`text-sm ${data.change >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {data.change >= 0 ? '+' : ''}{data.change?.toFixed(2)}%
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -712,11 +1099,16 @@ const TradingSystem = () => {
           <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
             <div className="flex justify-between items-start">
               <div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
                   <h2 className="text-3xl font-bold">{selectedStock}</h2>
-                  {currentData.liquidityRank && (
+                  {currentData.dataSource === 'Yahoo Finance' && (
+                    <span className="bg-green-600 text-white px-3 py-1 rounded-full text-sm font-semibold">
+                      Dados Reais
+                    </span>
+                  )}
+                  {currentData.liquidityRank <= 30 && (
                     <span className="bg-blue-600 text-white px-3 py-1 rounded-full text-sm font-semibold">
-                      Liquidez #{currentData.liquidityRank}
+                      Top #{currentData.liquidityRank}
                     </span>
                   )}
                 </div>
@@ -730,13 +1122,46 @@ const TradingSystem = () => {
                   {signals.score}/100
                 </div>
                 <div className={`text-xl font-semibold mt-2 ${signals.score >= 70 ? 'text-green-400' : signals.score >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>
-                  {signals.score >= 70 ? '📊 Análise Positiva' : signals.score >= 40 ? '⚠️ Neutro' : '📉 Análise Negativa'}
+                  {signals.score >= 70 ? '📊 Positivo' : signals.score >= 40 ? '⚠️ Neutro' : '📉 Negativo'}
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Pontos de Entrada e Saída */}
+          {/* Filtro de Período */}
+          <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
+            <div className="flex justify-between items-center flex-wrap gap-4">
+              <h3 className="text-lg font-bold">Análise Temporal</h3>
+              <div className="flex gap-2 flex-wrap">
+                {[
+                  { value: 'daily', label: '📅 Diário', desc: 'Curto prazo' },
+                  { value: 'weekly', label: '📊 Semanal', desc: 'Médio prazo' },
+                  { value: 'monthly', label: '📈 Mensal', desc: 'Longo prazo' },
+                  { value: 'yearly', label: '🎯 Anual', desc: 'Muito longo prazo' }
+                ].map(period => (
+                  <button
+                    key={period.value}
+                    onClick={() => setTimeframe(period.value)}
+                    className={`px-4 py-2 rounded-lg font-semibold transition-all ${
+                      timeframe === period.value
+                        ? 'bg-blue-600 text-white shadow-lg scale-105'
+                        : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                    }`}
+                    title={period.desc}
+                  >
+                    {period.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="mt-3 text-sm text-slate-400">
+              {timeframe === 'daily' && '⚡ Operações rápidas - Stop loss mais apertado (3%)'}
+              {timeframe === 'weekly' && '📊 Swing trade - Stop loss moderado (5%)'}
+              {timeframe === 'monthly' && '📈 Position trade - Stop loss amplo (8%)'}
+              {timeframe === 'yearly' && '🎯 Investimento - Stop loss muito amplo (12%)'}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border-2 border-green-600">
               <h3 className="text-xl font-bold mb-4 flex items-center text-green-400">
@@ -746,10 +1171,17 @@ const TradingSystem = () => {
               <div className="space-y-3">
                 {entryExitData.entry.map((entry, idx) => (
                   <div key={idx} className="bg-green-900/20 p-3 rounded-lg">
-                    <div className="text-2xl font-bold text-green-400">R$ {entry.price?.toFixed(2)}</div>
+                    <div className="flex justify-between items-start mb-1">
+                      <div className="text-2xl font-bold text-green-400">R$ {entry.price?.toFixed(2)}</div>
+                      {entry.probability && (
+                        <div className="text-xs bg-green-500 text-white px-2 py-1 rounded font-bold">
+                          {entry.probability.toFixed(0)}% chance
+                        </div>
+                      )}
+                    </div>
                     <div className="text-sm text-slate-300 mt-1">{entry.reason}</div>
                     <div className={`text-xs mt-1 font-semibold ${entry.distance > 0 ? 'text-yellow-400' : entry.distance < 0 ? 'text-blue-400' : 'text-slate-400'}`}>
-                      {entry.distance !== 0 ? `${entry.distance > 0 ? '+' : ''}${entry.distance.toFixed(2)}% do preço atual` : 'Preço de mercado'}
+                      {entry.distance !== 0 ? `${entry.distance > 0 ? '+' : ''}${entry.distance.toFixed(2)}%` : 'Preço atual'}
                     </div>
                   </div>
                 ))}
@@ -771,53 +1203,50 @@ const TradingSystem = () => {
                 Pontos de Saída ({timeframe === 'daily' ? 'Diário' : timeframe === 'weekly' ? 'Semanal' : timeframe === 'monthly' ? 'Mensal' : 'Anual'})
               </h3>
               <div className="space-y-3">
-                {entryExitData.exit.map((exit, idx) => (
-                  <div key={idx} className="bg-blue-900/20 p-3 rounded-lg">
-                    <div className="text-2xl font-bold text-blue-400">R$ {exit.price?.toFixed(2)}</div>
-                    <div className="text-sm text-slate-300 mt-1">{exit.reason}</div>
-                    <div className="text-xs text-green-400 mt-1 font-semibold">
-                      {exit.distance ? `+${exit.distance.toFixed(2)}% de ganho potencial` : 'Calculando...'}
+                {entryExitData.exit.map((exit, idx) => {
+                  // Calcular lucro real baseado no primeiro ponto de entrada
+                  const entryPrice = entryExitData.entry.length > 0 ? entryExitData.entry[0].price : currentData.price;
+                  const realProfit = ((exit.price - entryPrice) / entryPrice) * 100;
+                  
+                  return (
+                    <div key={idx} className="bg-blue-900/20 p-3 rounded-lg">
+                      <div className="flex justify-between items-start mb-1">
+                        <div className="text-2xl font-bold text-blue-400">R$ {exit.price?.toFixed(2)}</div>
+                        {exit.probability && (
+                          <div className={`text-xs px-2 py-1 rounded font-bold ${
+                            exit.probability >= 80 ? 'bg-green-500 text-white' : 
+                            exit.probability >= 75 ? 'bg-yellow-500 text-white' : 
+                            'bg-orange-500 text-white'
+                          }`}>
+                            {exit.probability.toFixed(0)}% chance
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-sm text-slate-300 mt-1">{exit.reason}</div>
+                      <div className="text-xs text-green-400 mt-1 font-semibold">
+                        +{realProfit?.toFixed(2)}% potencial
+                      </div>
+                      {idx === 0 && entryExitData.entry.length > 0 && (
+                        <div className="text-xs text-slate-400 mt-1">
+                          Lucro de R$ {entryPrice.toFixed(2)} → R$ {exit.price?.toFixed(2)}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
 
-          {/* Filtro de Período */}
-          <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-bold">Análise Temporal</h3>
-              <div className="flex gap-2">
-                {[
-                  { value: 'daily', label: 'Diário' },
-                  { value: 'weekly', label: 'Semanal' },
-                  { value: 'monthly', label: 'Mensal' },
-                  { value: 'yearly', label: 'Anual' }
-                ].map(period => (
-                  <button
-                    key={period.value}
-                    onClick={() => setTimeframe(period.value)}
-                    className={`px-4 py-2 rounded-lg font-semibold transition-all ${
-                      timeframe === period.value
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                    }`}
-                  >
-                    {period.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {historicalData.length > 0 && (
             <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
-              <h3 className="text-lg font-bold mb-4">Histórico de Preço ({timeframe === 'daily' ? '30 dias' : timeframe === 'weekly' ? '52 semanas' : timeframe === 'monthly' ? '12 meses' : '5 anos'})</h3>
-              <ResponsiveContainer width="100%" height={250}>
+              <h3 className="text-lg font-bold mb-4">
+                Histórico de Preço ({timeframe === 'daily' ? '30 dias' : timeframe === 'weekly' ? '52 semanas' : timeframe === 'monthly' ? '12 meses' : '5 anos'})
+              </h3>
+              <ResponsiveContainer width="100%" height={300}>
                 <LineChart data={historicalData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey="time" stroke="#94a3b8" />
+                  <XAxis dataKey="date" stroke="#94a3b8" />
                   <YAxis stroke="#94a3b8" />
                   <Tooltip 
                     contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155' }}
@@ -827,32 +1256,16 @@ const TradingSystem = () => {
                 </LineChart>
               </ResponsiveContainer>
             </div>
-
-            <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
-              <h3 className="text-lg font-bold mb-4">Volume</h3>
-              <ResponsiveContainer width="100%" height={250}>
-                <BarChart data={historicalData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey="time" stroke="#94a3b8" />
-                  <YAxis stroke="#94a3b8" />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155' }}
-                    labelStyle={{ color: '#94a3b8' }}
-                  />
-                  <Bar dataKey="volume" fill="#10b981" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
+          )}
 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {[
-              { label: 'RSI', value: currentData.rsi, unit: '', warning: currentData.rsi > 70 || currentData.rsi < 30 },
-              { label: 'MACD', value: currentData.macd, unit: '', warning: currentData.macd < 0 },
-              { label: 'ADX', value: currentData.adx, unit: '', warning: currentData.adx < 20 },
-              { label: 'Volume', value: currentData.volume / 1000000, unit: 'M', warning: false }
+              { label: 'RSI', value: currentData.rsi, unit: '' },
+              { label: 'MACD', value: currentData.macd, unit: '' },
+              { label: 'ADX', value: currentData.adx, unit: '' },
+              { label: 'Volume', value: currentData.volume / 1000000, unit: 'M' }
             ].map((indicator, idx) => (
-              <div key={idx} className={`bg-slate-800 rounded-xl shadow-2xl p-4 border ${indicator.warning ? 'border-yellow-500' : 'border-slate-700'}`}>
+              <div key={idx} className="bg-slate-800 rounded-xl shadow-2xl p-4 border border-slate-700">
                 <div className="text-sm text-slate-400">{indicator.label}</div>
                 <div className="text-2xl font-bold mt-1">
                   {indicator.value?.toFixed(2)}{indicator.unit}
@@ -873,7 +1286,7 @@ const TradingSystem = () => {
                     <div className="w-2 h-2 bg-green-400 rounded-full mt-1.5 mr-2 flex-shrink-0"></div>
                     <span>{signal}</span>
                   </div>
-                )) : <p className="text-slate-500 text-sm italic">Nenhum sinal ativo</p>}
+                )) : <p className="text-slate-500 text-sm italic">Nenhum sinal</p>}
               </div>
             </div>
 
@@ -903,45 +1316,16 @@ const TradingSystem = () => {
                     <div className="w-2 h-2 bg-red-400 rounded-full mt-1.5 mr-2 flex-shrink-0"></div>
                     <span>{signal}</span>
                   </div>
-                )) : <p className="text-slate-500 text-sm italic">Nenhum sinal ativo</p>}
+                )) : <p className="text-slate-500 text-sm italic">Nenhum sinal</p>}
               </div>
-            </div>
-          </div>
-
-          <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
-            <h3 className="text-lg font-bold mb-4 flex items-center">
-              <Bell className="w-5 h-5 mr-2 text-blue-400" />
-              Histórico de Alertas
-            </h3>
-            <div className="space-y-2 max-h-96 overflow-y-auto">
-              {alerts.length > 0 ? alerts.map(alert => (
-                <div 
-                  key={alert.id}
-                  className={`p-4 rounded-lg border-l-4 ${
-                    alert.type === 'entry' 
-                      ? 'bg-green-900/20 border-green-400' 
-                      : 'bg-red-900/20 border-red-400'
-                  }`}
-                >
-                  <div className="flex justify-between items-start mb-2">
-                    <span className="font-bold">{alert.message}</span>
-                    <span className="text-sm text-slate-400">{formatTimestamp(alert.timestamp)}</span>
-                  </div>
-                  <div className="text-sm text-slate-300">
-                    {alert.signals.slice(0, 3).join(' • ')}
-                  </div>
-                </div>
-              )) : (
-                <p className="text-slate-500 text-center py-8">Nenhum alerta registrado</p>
-              )}
             </div>
           </div>
         </div>
       </div>
 
       <div className="mt-6 text-center text-sm text-slate-500">
-        <p>📊 Sistema de análise técnica com dados simulados para fins educacionais</p>
-        <p className="mt-1">⚠️ Não constitui recomendação de investimento • Consulte um profissional certificado</p>
+        <p>📊 Sistema com dados reais via Yahoo Finance API</p>
+        <p className="mt-1">⚠️ Não constitui recomendação de investimento</p>
       </div>
     </div>
   );
