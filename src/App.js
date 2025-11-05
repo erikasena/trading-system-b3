@@ -56,16 +56,8 @@ const TradingSystem = () => {
     }
   }, []);
 
-  // 💾 SALVAR WATCHLIST AUTOMATICAMENTE
-  useEffect(() => {
-    if (watchlist.length > 0) {
-      try {
-        localStorage.setItem('tradingB3_watchlist', JSON.stringify(watchlist));
-      } catch (error) {
-        console.error('Erro ao salvar watchlist:', error);
-      }
-    }
-  }, [watchlist]);
+  // 💾 SALVAR WATCHLIST AUTOMATICAMENTE (removido - agora salva direto nas funções)
+  // useEffect foi removido para evitar loops
 
   // 💾 SALVAR AÇÃO SELECIONADA
   useEffect(() => {
@@ -884,7 +876,12 @@ const TradingSystem = () => {
       return;
     }
 
-    setWatchlist([...watchlist, ticker]);
+    // Adicionar à watchlist
+    const newWatchlist = [...watchlist, ticker];
+    setWatchlist(newWatchlist);
+    
+    // 💾 SALVAR IMEDIATAMENTE
+    localStorage.setItem('tradingB3_watchlist', JSON.stringify(newWatchlist));
     
     if (!stocksData[ticker]) {
       setLoading(true);
@@ -900,14 +897,23 @@ const TradingSystem = () => {
     const newWatchlist = watchlist.filter(t => t !== ticker);
     setWatchlist(newWatchlist);
     
-    // Se removeu a ação selecionada, selecionar outra
-    if (selectedStock === ticker && newWatchlist.length > 0) {
-      setSelectedStock(newWatchlist[0]);
-    } else if (newWatchlist.length === 0) {
-      setSelectedStock('');
-      // Limpar localStorage se não há mais ações
+    // 💾 SALVAR IMEDIATAMENTE
+    if (newWatchlist.length > 0) {
+      localStorage.setItem('tradingB3_watchlist', JSON.stringify(newWatchlist));
+    } else {
       localStorage.removeItem('tradingB3_watchlist');
       localStorage.removeItem('tradingB3_selectedStock');
+    }
+    
+    // Se removeu a ação selecionada, selecionar outra
+    if (selectedStock === ticker) {
+      if (newWatchlist.length > 0) {
+        const newSelected = newWatchlist[0];
+        setSelectedStock(newSelected);
+        localStorage.setItem('tradingB3_selectedStock', newSelected);
+      } else {
+        setSelectedStock('');
+      }
     }
   };
 
